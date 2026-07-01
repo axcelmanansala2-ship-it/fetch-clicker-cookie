@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#1B1F3B</color>
+    <color name="colorPrimaryVariant">#2D3163</color>
+    <color name="colorSecondary">#00E5FF</color>
+    <color name="colorSecondaryVariant">#00B2D6</color>
+    <color name="colorBackground">#12151F</color>
+    <color name="colorSurface">#1E2235</color>
+    <color name="colorOnPrimary">#FFFFFF</color>
+    <color name="colorOnBackground">#FFFFFF</color>
+    <color name="colorError">#FF5252</color>
+    <color name="colorSuccess">#69F0AE</color>
+    <color name="colorWarning">#FFD740</color>
+    <color name="colorOverlayStart">#69F0AE</color>
+    <color name="colorOverlayStop">#FF5252</color>
+    <color name="colorOverlayBg">#CC1B1F3B</color>
+    <!-- Account checker overlay uses orange to distinguish from auto-clicker -->
+    <color name="colorCheckerStart">#FF9800</color>
+</resources>

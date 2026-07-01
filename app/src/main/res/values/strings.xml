@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Smart Auto Clicker</string>
+    <string name="title_target_setup">Detection Targets</string>
+
+    <!-- Accessibility -->
+    <string name="accessibility_service_label">Smart Auto Clicker</string>
+    <string name="accessibility_service_description">Required to perform automatic taps and read UI elements on screen.</string>
+
+    <!-- Main screen -->
+    <string name="permission_overlay_title">Display Over Apps</string>
+    <string name="permission_overlay_desc">Allows the floating buttons to appear over other apps.</string>
+    <string name="permission_accessibility_title">Accessibility Service</string>
+    <string name="permission_accessibility_desc">Required to read UI elements and perform automatic taps.</string>
+    <string name="btn_grant">Grant</string>
+    <string name="btn_manage_targets">⚙ Manage Auto-Click Targets</string>
+    <string name="btn_account_checker">🎮 COD Account Checker</string>
+    <string name="btn_start_service">▶ Start Auto-Click Overlay</string>
+    <string name="btn_stop_service">■ Stop Auto-Click Overlay</string>
+    <string name="status_ready">✓ Ready — all permissions granted</string>
+    <string name="status_missing">⚠ Missing permissions — grant all above</string>
+
+    <!-- Overlay -->
+    <string name="btn_start">START</string>
+    <string name="btn_stop">STOP</string>
+
+    <!-- Target setup -->
+    <string name="hint_target_label">Config name (e.g. Open Via)</string>
+    <string name="hint_target_text">Text to find on screen (e.g. Via)</string>
+    <string name="btn_add_target">Add Target</string>
+    <string name="btn_delete">Delete</string>
+    <string name="no_targets">No targets yet — add one above</string>
+
+    <!-- Notification -->
+    <string name="notif_channel_name">Smart Auto Clicker</string>
+    <string name="notif_title">Smart Auto Clicker Running</string>
+    <string name="notif_text">Tap the overlay button to start/stop detection.</string>
+
+    <!-- Toasts / messages -->
+    <string name="msg_service_started">Auto-click overlay started</string>
+    <string name="msg_service_stopped">Service stopped</string>
+    <string name="msg_no_targets">Add at least one target first</string>
+    <string name="msg_accessibility_needed">Enable Accessibility Service in Settings</string>
+    <string name="msg_target_added">Target added</string>
+    <string name="msg_target_deleted">Target deleted</string>
+    <string name="msg_detecting">Detection started</string>
+    <string name="msg_stopped">Detection stopped</string>
+</resources>

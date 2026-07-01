@@ -1,0 +1,2 @@
+-keep class com.google.mlkit.** { *; }
+-keep class com.smartsystem.autoclicker.models.** { *; }

@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="110dp"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@color/colorOverlayBg"
+    android:padding="5dp">
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="CHECKER"
+        android:textColor="@color/colorCheckerStart"
+        android:textSize="8sp"
+        android:textStyle="bold"
+        android:letterSpacing="0.1" />
+
+    <Button
+        android:id="@+id/btnCheckerToggle"
+        android:layout_width="match_parent"
+        android:layout_height="36dp"
+        android:text="START"
+        android:textColor="@color/colorPrimary"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:backgroundTint="@color/colorCheckerStart"
+        android:stateListAnimator="@null" />
+
+    <TextView
+        android:id="@+id/tvCheckerStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Ready"
+        android:textColor="#FFFFFF"
+        android:textSize="8sp"
+        android:paddingTop="2dp"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/tvCheckerAccount"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textColor="@color/colorSecondary"
+        android:textSize="8sp"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+    <TextView
+        android:id="@+id/tvCheckerCounts"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textColor="#AAFFFFFF"
+        android:textSize="7sp"
+        android:paddingTop="1dp"
+        android:maxLines="1"
+        android:ellipsize="end" />
+
+</LinearLayout>

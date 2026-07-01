@@ -1,0 +1,129 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/colorBackground">
+
+    <!-- Start / Stop buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="12dp">
+
+        <Button
+            android:id="@+id/btnStartChecker"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:text="START CHECKER"
+            android:backgroundTint="@color/colorCheckerStart"
+            android:textColor="@color/colorPrimary"
+            android:textStyle="bold"
+            android:layout_marginEnd="8dp" />
+
+        <Button
+            android:id="@+id/btnStopChecker"
+            android:layout_width="0dp"
+            android:layout_height="48dp"
+            android:layout_weight="1"
+            android:text="STOP"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:textColor="@color/colorError" />
+
+    </LinearLayout>
+
+    <!-- Tab layout -->
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/tabLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/colorSurface"
+        app:tabTextColor="#AAFFFFFF"
+        app:tabSelectedTextColor="@color/colorSecondary"
+        app:tabIndicatorColor="@color/colorSecondary"
+        app:tabMode="scrollable" />
+
+    <!-- Add accounts panel (only shown for Pending tab) -->
+    <LinearLayout
+        android:id="@+id/addPanel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@color/colorSurface"
+        android:padding="12dp">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Add accounts (one per line, format: username:password)"
+            android:textColor="#AAFFFFFF"
+            android:textSize="11sp"
+            android:layout_marginBottom="6dp" />
+
+        <com.google.android.material.textfield.TextInputLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="user1:pass1&#10;user2:pass2&#10;user3:pass3"
+            style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+            android:layout_marginBottom="8dp">
+
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/etAccounts"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="textMultiLine"
+                android:minLines="3"
+                android:maxLines="6"
+                android:textColor="@color/colorOnBackground"
+                android:textSize="12sp"
+                android:fontFamily="monospace" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <Button
+            android:id="@+id/btnAddAccounts"
+            android:layout_width="match_parent"
+            android:layout_height="40dp"
+            android:text="ADD ACCOUNTS"
+            android:backgroundTint="@color/colorSecondary"
+            android:textColor="@color/colorPrimary"
+            android:textStyle="bold"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+
+    <!-- Empty state -->
+    <TextView
+        android:id="@+id/tvEmpty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textColor="#66FFFFFF"
+        android:textSize="13sp"
+        android:gravity="center"
+        android:padding="24dp"
+        android:visibility="gone" />
+
+    <!-- Account list -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/recyclerAccounts"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:clipToPadding="false"
+        android:paddingBottom="8dp" />
+
+    <!-- Clear button at bottom -->
+    <Button
+        android:id="@+id/btnClearTab"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="CLEAR THIS TAB"
+        style="@style/Widget.MaterialComponents.Button.TextButton"
+        android:textColor="@color/colorError"
+        android:textSize="11sp"
+        android:layout_margin="4dp" />
+
+</LinearLayout>
