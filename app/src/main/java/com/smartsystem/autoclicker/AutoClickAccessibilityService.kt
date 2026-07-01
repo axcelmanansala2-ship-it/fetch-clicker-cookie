@@ -225,7 +225,23 @@ class AutoClickAccessibilityService : AccessibilityService() {
 
     fun pressBack() { performGlobalAction(GLOBAL_ACTION_BACK) }
     fun pressHome() { performGlobalAction(GLOBAL_ACTION_HOME) }
-    fun paste()     { performGlobalAction(GLOBAL_ACTION_PASTE) }
+
+    /**
+     * Paste clipboard content into the currently input-focused editable node.
+     * Uses ACTION_PASTE on the focused node (GLOBAL_ACTION_PASTE does not exist).
+     */
+    fun paste() {
+        for (root in getAllRoots()) {
+            val node = try { root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) } catch (_: Exception) { null }
+            if (node != null) {
+                node.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                try { node.recycle() } catch (_: Exception) {}
+                try { root.recycle() } catch (_: Exception) {}
+                return
+            }
+            try { root.recycle() } catch (_: Exception) {}
+        }
+    }
 
     companion object {
         private const val TAG = "AutoClickService"
