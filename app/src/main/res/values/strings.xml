@@ -45,4 +45,10 @@
     <string name="msg_target_deleted">Target deleted</string>
     <string name="msg_detecting">Detection started</string>
     <string name="msg_stopped">Detection stopped</string>
+
+    <!-- SSO Key / Cookie fetcher -->
+    <string name="sso_watching">Watching for SSO field…</string>
+    <string name="sso_fetching">Fetching from cookies…</string>
+    <string name="sso_filled">SSO key filled ✓</string>
+    <string name="btn_get_sso">Get from Cookies</string>
 </resources>
