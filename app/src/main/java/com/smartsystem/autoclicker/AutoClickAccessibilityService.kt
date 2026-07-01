@@ -11,23 +11,27 @@ import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 
 /**
- * Accessibility Service — two core capabilities:
+ * Accessibility Service — core capabilities:
  *
- * 1. findNodeCenter(text)   — reads the real Android UI tree to find any node
+ * 1. findNodeCenter(text)       — reads the real Android UI tree to find any node
  *    whose text/contentDescription contains [text] (case-insensitive).
  *
  * 2. fillTextField(hint, value) — finds an editable field by its hint/placeholder
  *    text and types [value] into it using ACTION_SET_TEXT (no simulated keystrokes).
  *
- * 3. tapByText(text)   — find + tap a node in one call.
+ * 3. tapByText(text)            — find + tap a node in one call.
  *
  * 4. hasAnyText(vararg queries) — returns the first matching query if any text
  *    appears on screen, or null if none found.
  *
- * 5. tap(x, y)         — dispatch a synthetic tap gesture at screen coordinates.
+ * 5. tap(x, y)                  — dispatch a synthetic tap gesture at screen coordinates.
  *
- * 6. pressBack()       — dispatch GLOBAL_ACTION_BACK.
- * 7. pressHome()       — dispatch GLOBAL_ACTION_HOME.
+ * 6. pressBack()                — dispatch GLOBAL_ACTION_BACK.
+ * 7. pressHome()                — dispatch GLOBAL_ACTION_HOME.
+ * 8. paste()                    — dispatch GLOBAL_ACTION_PASTE.
+ *
+ * 9. readAllScreenText()        — collect all visible text from every node on screen.
+ *    Useful for reading cookie viewer content.
  */
 class AutoClickAccessibilityService : AccessibilityService() {
 
@@ -165,6 +169,33 @@ class AutoClickAccessibilityService : AccessibilityService() {
         return null
     }
 
+    // ─── Read all screen text ─────────────────────────────────────────────────
+
+    /**
+     * Collects all visible text from every node on screen into one string.
+     * Used for reading cookie viewer content after "View Cookies" is tapped.
+     */
+    fun readAllScreenText(): String {
+        val sb = StringBuilder()
+        for (root in getAllRoots()) {
+            collectText(root, sb)
+            try { root.recycle() } catch (_: Exception) {}
+        }
+        return sb.toString()
+    }
+
+    private fun collectText(node: AccessibilityNodeInfo, sb: StringBuilder) {
+        val text = node.text?.toString()?.trim()
+        val desc = node.contentDescription?.toString()?.trim()
+        if (!text.isNullOrBlank()) sb.append(text).append(" ")
+        if (!desc.isNullOrBlank() && desc != text) sb.append(desc).append(" ")
+        for (i in 0 until node.childCount) {
+            val child = try { node.getChild(i) } catch (_: Exception) { null } ?: continue
+            collectText(child, sb)
+            try { child.recycle() } catch (_: Exception) {}
+        }
+    }
+
     // ─── Convenience: tap by text ─────────────────────────────────────────────
 
     /** Find a node containing [text] and tap its center. Returns true if tapped. */
@@ -194,6 +225,7 @@ class AutoClickAccessibilityService : AccessibilityService() {
 
     fun pressBack() { performGlobalAction(GLOBAL_ACTION_BACK) }
     fun pressHome() { performGlobalAction(GLOBAL_ACTION_HOME) }
+    fun paste()     { performGlobalAction(GLOBAL_ACTION_PASTE) }
 
     companion object {
         private const val TAG = "AutoClickService"
