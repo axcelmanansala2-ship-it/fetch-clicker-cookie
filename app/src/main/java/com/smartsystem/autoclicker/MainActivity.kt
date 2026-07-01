@@ -45,6 +45,20 @@ class MainActivity : AppCompatActivity() {
         binding.btnAccountChecker.setOnClickListener {
             startActivity(Intent(this, AccountCheckerActivity::class.java))
         }
+
+        // NEW: SSO Key Service
+        binding.btnSsoKey.setOnClickListener { toggleSsoService() }
+    }
+
+    private fun toggleSsoService() {
+        if (!hasOverlayPermission() || !isAccessibilityEnabled()) {
+            Toast.makeText(this, getString(R.string.status_missing), Toast.LENGTH_SHORT).show()
+            return
+        }
+        ContextCompat.startForegroundService(this,
+            Intent(this, SsoKeyService::class.java))
+        Toast.makeText(this, "SSO Key Watcher started", Toast.LENGTH_SHORT).show()
+        finish()
     }
 
     private fun refreshPermissionStatus() {
