@@ -26,56 +26,6 @@
         android:backgroundTint="@color/colorCheckerStart"
         android:stateListAnimator="@null" />
 
-    <!-- SSO Key section -->
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:background="#33FFFFFF"
-        android:layout_marginTop="4dp"
-        android:layout_marginBottom="3dp" />
-
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="SSO KEY"
-        android:textColor="#FFCC00"
-        android:textSize="7sp"
-        android:textStyle="bold"
-        android:letterSpacing="0.1" />
-
-    <!-- "Get from Cookies" button — manually trigger the cookie fetch -->
-    <Button
-        android:id="@+id/btnGetSso"
-        android:layout_width="match_parent"
-        android:layout_height="28dp"
-        android:text="Get from Cookies"
-        android:textColor="@color/colorPrimary"
-        android:textSize="8sp"
-        android:textStyle="bold"
-        android:backgroundTint="#7B5EA7"
-        android:stateListAnimator="@null"
-        android:layout_marginTop="2dp" />
-
-    <!-- Live SSO status: shows "Watching…", "SSO field detected!", "✓ abc1234●●●●cdef" -->
-    <TextView
-        android:id="@+id/tvSsoStatus"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Watching…"
-        android:textColor="#FFCC00"
-        android:textSize="7sp"
-        android:paddingTop="2dp"
-        android:maxLines="2"
-        android:ellipsize="end" />
-
-    <!-- Divider -->
-    <View
-        android:layout_width="match_parent"
-        android:layout_height="1dp"
-        android:background="#33FFFFFF"
-        android:layout_marginTop="3dp"
-        android:layout_marginBottom="3dp" />
-
     <TextView
         android:id="@+id/tvCheckerStatus"
         android:layout_width="match_parent"
@@ -83,6 +33,7 @@
         android:text="Ready"
         android:textColor="#FFFFFF"
         android:textSize="8sp"
+        android:paddingTop="4dp"
         android:maxLines="1"
         android:ellipsize="end" />
 
