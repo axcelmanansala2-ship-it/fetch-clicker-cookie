@@ -57,7 +57,7 @@
                 android:value="overlay" />
         </service>
 
-        <!-- New COD account checker overlay service -->
+        <!-- COD account checker overlay service (separate from SSO) -->
         <service
             android:name=".AccountCheckerService"
             android:exported="false"
@@ -67,7 +67,17 @@
                 android:value="overlay" />
         </service>
 
-        <!-- Accessibility service (shared by both features) -->
+        <!-- SSO Key Service — standalone, separate from account checker -->
+        <service
+            android:name=".SsoKeyService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="overlay" />
+        </service>
+
+        <!-- Accessibility service (shared by all features) -->
         <service
             android:name=".AutoClickAccessibilityService"
             android:exported="true"
