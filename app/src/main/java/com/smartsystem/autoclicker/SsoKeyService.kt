@@ -169,11 +169,11 @@ class SsoKeyService : Service() {
                         Log.d(TAG, "SSO field detected — starting cookie fetch")
                         withContext(Dispatchers.Main) { setStatus("SSO field detected!") }
                         fetchSsoKeyFromBrowser(svc)
-                        delay(5000L)
+                        delay(3000L)
                         continue
                     }
                 }
-                delay(1000L)
+                delay(500L)
             }
         }
     }
@@ -199,7 +199,7 @@ class SsoKeyService : Service() {
 
         Log.d(TAG, "Tapping lock icon at ($lockX, $lockY) on ${screenW}×${screenH} screen")
         svc.tap(lockX, lockY)
-        delay(1000)
+        delay(300)
 
         // ── Step 2: Tap "View Cookies" or "Cookies" (text element in the popup) ─
         val tappedCookies = withContext(Dispatchers.IO) {
@@ -208,13 +208,13 @@ class SsoKeyService : Service() {
 
         if (!tappedCookies) {
             svc.pressBack()
-            delay(300)
+            delay(150)
             withContext(Dispatchers.Main) { setStatus("View Cookies not found") }
             Log.w(TAG, "'View Cookies' not found in popup after tapping lock icon")
             return
         }
 
-        delay(1200)
+        delay(400)
 
         // ── Step 3: Read all screen text and extract sso_key ─────────────────
         val screenText = withContext(Dispatchers.IO) { svc.readAllScreenText() }
@@ -224,7 +224,7 @@ class SsoKeyService : Service() {
 
         // ── Step 4: Press back to close cookie viewer ─────────────────────────
         svc.pressBack()
-        delay(600)
+        delay(200)
 
         if (ssoValue == null) {
             withContext(Dispatchers.Main) { setStatus("sso_key not found") }
