@@ -35,16 +35,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Aim Lock Service — v2 fixes:
+ * v3 fixes:
  *
- * Fix 1 — Input blocking:
- *   - 350ms minimum cooldown between swipes (was 0ms — flooded CODM with gestures)
- *   - Polling slowed to 120ms (was 80ms)
- *   - After a swipe, skip the next 2 poll cycles (gives user ~240ms of free input)
+ * Fix 1 — Simultaneous aim + user touch:
+ *   Removed skipCycles entirely — aim gestures now fire as soon as target is detected
+ *   without pausing, so the user can press fire/move at the same time.
+ *   Accessibility gestures go to a different screen zone than most user buttons
+ *   (aim swipe: center-right; fire: far right; move: left).
  *
- * Fix 2 — False lock-on:
- *   - Only swipes when BullseyeDetector confirms 2 consecutive frames (already in detector)
- *   - Only swipes if crosshair offset > 12px (was 5px — too sensitive)
+ * Fix 2 — Shorter cooldown:
+ *   200ms between swipes (was 350ms) — more responsive tracking of moving target.
  */
 class AimLockService : Service() {
 
@@ -59,10 +59,7 @@ class AimLockService : Service() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var aimJob: Job? = null
     private var isRunning = false
-
-    // Cooldown tracking — prevents gesture flooding that blocks user input
     private var lastSwipeTime = 0L
-    private var skipCycles = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -80,7 +77,6 @@ class AimLockService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-
         if (mediaProjection == null) {
             val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, Activity.RESULT_CANCELED)
                 ?: Activity.RESULT_CANCELED
@@ -187,7 +183,6 @@ class AimLockService : Service() {
         }
 
         isRunning = true
-        skipCycles = 0
         BullseyeDetector.reset()
         updateOverlay("Scanning…", "")
 
@@ -197,13 +192,6 @@ class AimLockService : Service() {
             val screenH = resources.displayMetrics.heightPixels.toFloat()
 
             while (isActive && isRunning) {
-                // If we just fired a swipe, skip a couple cycles to let user input through
-                if (skipCycles > 0) {
-                    skipCycles--
-                    delay(POLL_MS)
-                    continue
-                }
-
                 val bitmap = withContext(Dispatchers.IO) { screenCapture?.captureScreen() }
                 if (bitmap == null) { delay(POLL_MS); continue }
 
@@ -221,12 +209,11 @@ class AimLockService : Service() {
 
                     val now = SystemClock.elapsedRealtime()
                     val offsetBig = Math.abs(dx) > MIN_OFFSET_PX || Math.abs(dy) > MIN_OFFSET_PX
-                    val cooldownOk = (now - lastSwipeTime) >= SWIPE_COOLDOWN_MS
-
-                    if (offsetBig && cooldownOk) {
+                    // No skipCycles — aim fires immediately every poll when target locked.
+                    // SWIPE_COOLDOWN_MS prevents spamming but still allows simultaneous user touch.
+                    if (offsetBig && (now - lastSwipeTime) >= SWIPE_COOLDOWN_MS) {
                         performAimSwipe(screenW, screenH, dx, dy)
                         lastSwipeTime = now
-                        skipCycles = POST_SWIPE_SKIP   // give user free input after each swipe
                     }
                 } else {
                     missCount++
@@ -244,7 +231,6 @@ class AimLockService : Service() {
         aimJob?.cancel()
         aimJob = null
         isRunning = false
-        skipCycles = 0
         BullseyeDetector.reset()
         updateOverlay("Stopped", "")
     }
@@ -253,16 +239,13 @@ class AimLockService : Service() {
 
     private fun performAimSwipe(screenW: Float, screenH: Float, dx: Float, dy: Float) {
         val svc = AutoClickAccessibilityService.instance ?: return
-
         val originX = screenW * AIM_ORIGIN_X
         val originY = screenH * AIM_ORIGIN_Y
         val endX = (originX + dx * SENSITIVITY).coerceIn(screenW * 0.5f, screenW * 0.98f)
         val endY = (originY + dy * SENSITIVITY).coerceIn(screenH * 0.05f, screenH * 0.95f)
-
         val path = Path().apply { moveTo(originX, originY); lineTo(endX, endY) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, SWIPE_DURATION_MS)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        svc.dispatchGesture(gesture, null, null)
+        svc.dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), null, null)
     }
 
     // ─── Notification ─────────────────────────────────────────────────────────
@@ -274,11 +257,9 @@ class AimLockService : Service() {
                 NotificationChannel(NOTIF_CHANNEL, "Aim Lock", NotificationManager.IMPORTANCE_LOW)
             )
         }
-        val stop = PendingIntent.getService(
-            this, 0,
+        val stop = PendingIntent.getService(this, 0,
             Intent(this, AimLockService::class.java).apply { action = ACTION_STOP },
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         return Notification.Builder(this, NOTIF_CHANNEL)
             .setContentTitle("Aim Lock Active")
             .setContentText("Detecting bullseye targets…")
@@ -288,17 +269,16 @@ class AimLockService : Service() {
     }
 
     companion object {
-        private const val TAG              = "AimLockService"
-        private const val NOTIF_ID         = 1004
-        private const val NOTIF_CHANNEL    = "aim_lock"
-        private const val POLL_MS          = 120L   // slowed from 80ms → less input pressure
+        private const val TAG               = "AimLockService"
+        private const val NOTIF_ID          = 1004
+        private const val NOTIF_CHANNEL     = "aim_lock"
+        private const val POLL_MS           = 100L
         private const val SWIPE_DURATION_MS = 60L
-        private const val SWIPE_COOLDOWN_MS = 350L  // min ms between swipes
-        private const val POST_SWIPE_SKIP  = 2      // skip N cycles after each swipe (~240ms free)
-        private const val MIN_OFFSET_PX    = 12f    // raised from 5px → less jitter
-        private const val SENSITIVITY      = 0.28f
-        private const val AIM_ORIGIN_X     = 0.75f
-        private const val AIM_ORIGIN_Y     = 0.50f
+        private const val SWIPE_COOLDOWN_MS = 200L  // 200ms — responsive, not spammy
+        private const val MIN_OFFSET_PX     = 10f
+        private const val SENSITIVITY       = 0.28f
+        private const val AIM_ORIGIN_X      = 0.75f
+        private const val AIM_ORIGIN_Y      = 0.50f
 
         const val ACTION_STOP           = "com.smartsystem.autoclicker.AIM_STOP"
         const val EXTRA_RESULT_CODE     = "extra_result_code"
