@@ -460,13 +460,12 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .addOnFailureListener { cont.resume("") }
     }
 
-    // Convert ALL-CAPS words (2+ letters) to Title Case so TTS reads them as
-    // natural words instead of spelling them out letter by letter.
-    // e.g. AXCEL → Axcel, DOKJA → Dokja, BUT single-letter 'I' stays as-is.
+    // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
+    // as words, never as abbreviations spelled letter-by-letter.
+    // DOKJA -> dokja, AXCEL -> axcel, RATTLE -> rattle
+    // Single uppercase letters (pronoun 'I') are left unchanged.
     private fun normalizeForTts(text: String): String =
-        text.replace(Regex("""\b([A-Z]{2,})\b""")) { m ->
-            m.value.lowercase().replaceFirstChar { it.uppercase() }
-        }
+        text.replace(Regex("[A-Z]{2,}")) { m -> m.value.lowercase() }
 
     private suspend fun speakAndWait(text: String): Unit = suspendCoroutine { cont ->
         val uid = "chunk_${System.currentTimeMillis()}"
