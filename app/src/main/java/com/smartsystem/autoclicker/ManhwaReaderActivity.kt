@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.animation.DecelerateInterpolator
@@ -50,6 +51,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private lateinit var btnStop: Button
     private lateinit var btnAutoScroll: ToggleButton
     private lateinit var btnSettings: Button
+    private lateinit var readingHighlight: View
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -57,7 +59,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var autoScrollEnabled = true
     private var readingJob: Job? = null
     private val pageBitmaps = mutableListOf<Bitmap>()
+
+    // Track reading position (page index + pixel offset within that page's view)
     private var currentPageIndex = 0
+    private var currentChunkOffset = 0
 
     // Settings
     private var ttsSpeed = 1.0f
@@ -69,23 +74,26 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_manhwa_reader)
 
-        scrollView     = findViewById(R.id.manhwaScrollView)
-        pagesContainer = findViewById(R.id.pagesContainer)
-        tvStatus       = findViewById(R.id.tvManhwaStatus)
-        tvPageCount    = findViewById(R.id.tvPageCount)
-        btnReadPause   = findViewById(R.id.btnReadPause)
-        btnStop        = findViewById(R.id.btnManhwaStop)
-        btnAutoScroll  = findViewById(R.id.btnAutoScroll)
-        btnSettings    = findViewById(R.id.btnSettings)
+        scrollView       = findViewById(R.id.manhwaScrollView)
+        pagesContainer   = findViewById(R.id.pagesContainer)
+        tvStatus         = findViewById(R.id.tvManhwaStatus)
+        tvPageCount      = findViewById(R.id.tvPageCount)
+        btnReadPause     = findViewById(R.id.btnReadPause)
+        btnStop          = findViewById(R.id.btnManhwaStop)
+        btnAutoScroll    = findViewById(R.id.btnAutoScroll)
+        btnSettings      = findViewById(R.id.btnSettings)
+        readingHighlight = findViewById(R.id.readingHighlight)
 
         tts = TextToSpeech(this, this)
         loadFileFromIntent()
 
-        btnReadPause.setOnClickListener { if (isReading) pauseReading() else startReading() }
-        btnStop.setOnClickListener { stopReading() }
-        btnAutoScroll.setOnCheckedChangeListener { _, checked -> autoScrollEnabled = checked }
-        btnSettings.setOnClickListener { showSettingsDialog() }
+        btnReadPause.setOnClickListener  { if (isReading) pauseReading() else startReading() }
+        btnStop.setOnClickListener       { stopReading() }
+        btnAutoScroll.setOnCheckedChangeListener { _, c -> autoScrollEnabled = c }
+        btnSettings.setOnClickListener   { showSettingsDialog() }
     }
+
+    // ── File loading ──────────────────────────────────────────────────────────
 
     @Suppress("DEPRECATION")
     private fun loadFileFromIntent() {
@@ -129,10 +137,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun updatePageCounter(index: Int) {
         val total = pageBitmaps.size
-        tvPageCount.text = if (total > 0) "${index + 1} / $total" else ""
+        tvPageCount.text = if (total > 0) "${index + 1}/${total}" else ""
     }
-
-    // ── Loaders ──────────────────────────────────────────────────────────────
 
     private fun loadImagePage(uri: Uri): List<Bitmap> {
         return try {
@@ -151,7 +157,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         try {
             fd = openPdfDescriptor(uri) ?: return emptyList()
             renderer = PdfRenderer(fd)
-            val targetWidth = minOf(resources.displayMetrics.widthPixels, 720)
+            // Cap at 640px wide — halves memory vs full screen width
+            val targetWidth = minOf(resources.displayMetrics.widthPixels, 640)
             for (i in 0 until renderer.pageCount) {
                 val page = renderer.openPage(i)
                 val scale = targetWidth.toFloat() / page.width.coerceAtLeast(1)
@@ -183,56 +190,25 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ── Settings dialog ───────────────────────────────────────────────────────
+    // ── Settings ──────────────────────────────────────────────────────────────
 
     private fun showSettingsDialog() {
         if (isReading) pauseReading()
-
-        val speedLabels = arrayOf("Slow (0.75x)", "Normal (1.0x)", "Fast (1.5x)", "Very Fast (2.0x)")
-        val speedValues = floatArrayOf(0.75f, 1.0f, 1.5f, 2.0f)
+        val speedLabels  = arrayOf("Slow (0.75x)", "Normal (1.0x)", "Fast (1.5x)", "Very Fast (2.0x)")
+        val speedValues  = floatArrayOf(0.75f, 1.0f, 1.5f, 2.0f)
         val scrollLabels = arrayOf("Very Slow (4s)", "Slow (2.5s)", "Normal (1.5s)", "Fast (0.7s)")
         val scrollValues = longArrayOf(4000L, 2500L, 1500L, 700L)
-
         val curSpeedIdx  = speedValues.indexOfFirst { it == ttsSpeed }.takeIf { it >= 0 } ?: 1
         val curScrollIdx = scrollValues.indexOfFirst { it == scrollDuration }.takeIf { it >= 0 } ?: 2
 
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(56, 32, 56, 16)
-        }
-
-        layout.addView(TextView(this).apply {
-            text = "Reading Speed (TTS)"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 0, 0, 4)
-        })
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(56, 32, 56, 16) }
+        layout.addView(TextView(this).apply { text = "Reading Speed"; textSize = 13f; setTypeface(null, Typeface.BOLD); setPadding(0,0,0,4) })
         val speedGroup = RadioGroup(this)
-        speedLabels.forEachIndexed { i, label ->
-            RadioButton(this).apply {
-                text = label
-                id = 100 + i
-                isChecked = (i == curSpeedIdx)
-                speedGroup.addView(this)
-            }
-        }
+        speedLabels.forEachIndexed { i, label -> RadioButton(this).apply { text=label; id=100+i; isChecked=(i==curSpeedIdx); speedGroup.addView(this) } }
         layout.addView(speedGroup)
-
-        layout.addView(TextView(this).apply {
-            text = "Auto-Scroll Speed"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 20, 0, 4)
-        })
+        layout.addView(TextView(this).apply { text = "Auto-Scroll Speed"; textSize = 13f; setTypeface(null, Typeface.BOLD); setPadding(0,20,0,4) })
         val scrollGroup = RadioGroup(this)
-        scrollLabels.forEachIndexed { i, label ->
-            RadioButton(this).apply {
-                text = label
-                id = 200 + i
-                isChecked = (i == curScrollIdx)
-                scrollGroup.addView(this)
-            }
-        }
+        scrollLabels.forEachIndexed { i, label -> RadioButton(this).apply { text=label; id=200+i; isChecked=(i==curScrollIdx); scrollGroup.addView(this) } }
         layout.addView(scrollGroup)
 
         AlertDialog.Builder(this)
@@ -240,25 +216,23 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .setView(layout)
             .setPositiveButton("Apply") { _, _ ->
                 val si = speedGroup.checkedRadioButtonId - 100
-                if (si in speedValues.indices) {
-                    ttsSpeed = speedValues[si]
-                    tts?.setSpeechRate(ttsSpeed)
-                }
+                if (si in speedValues.indices) { ttsSpeed = speedValues[si]; tts?.setSpeechRate(ttsSpeed) }
                 val sc = scrollGroup.checkedRadioButtonId - 200
                 if (sc in scrollValues.indices) scrollDuration = scrollValues[sc]
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+            .setNegativeButton("Cancel", null).show()
     }
 
-    // ── Reading ───────────────────────────────────────────────────────────────
+    // ── Playback controls ─────────────────────────────────────────────────────
 
     private fun startReading() {
         if (!ttsReady) { Toast.makeText(this, "TTS not ready", Toast.LENGTH_SHORT).show(); return }
         if (pageBitmaps.isEmpty()) { Toast.makeText(this, "No pages loaded", Toast.LENGTH_SHORT).show(); return }
+        syncPositionFromScroll()   // update position to wherever user manually scrolled
         isReading = true
         btnReadPause.text = "\u23F8"
-        readingJob = lifecycleScope.launch { readPages(currentPageIndex) }
+        readingHighlight.visibility = View.VISIBLE
+        readingJob = lifecycleScope.launch { readViewportChunks() }
     }
 
     private fun pauseReading() {
@@ -267,6 +241,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         readingJob?.cancel()
         btnReadPause.text = "\u25B6"
         tvStatus.text = "Paused"
+        readingHighlight.visibility = View.GONE
+        clearPageHighlight()
     }
 
     private fun stopReading() {
@@ -275,39 +251,133 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         readingJob?.cancel()
         btnReadPause.text = "\u25B6"
         currentPageIndex = 0
+        currentChunkOffset = 0
         tvStatus.text = "Stopped"
         updatePageCounter(0)
+        readingHighlight.visibility = View.GONE
+        clearPageHighlight()
         scrollView.smoothScrollTo(0, 0)
     }
 
-    private suspend fun readPages(startIndex: Int) {
+    // When user manually scrolls then taps Play, start reading from current scroll position
+    private fun syncPositionFromScroll() {
+        val sy = scrollView.scrollY
+        for (i in pageBitmaps.indices) {
+            val v = pagesContainer.getChildAt(i) ?: continue
+            if (sy >= v.top && sy < v.top + v.height) {
+                currentPageIndex = i
+                currentChunkOffset = (sy - v.top).coerceAtLeast(0)
+                updatePageCounter(i)
+                return
+            }
+        }
+    }
+
+    private fun highlightPage(index: Int) {
+        for (i in 0 until pagesContainer.childCount) {
+            pagesContainer.getChildAt(i)?.setBackgroundColor(
+                if (i == index) Color.argb(28, 0, 229, 255) else Color.TRANSPARENT
+            )
+        }
+    }
+
+    private fun clearPageHighlight() {
+        for (i in 0 until pagesContainer.childCount) {
+            pagesContainer.getChildAt(i)?.setBackgroundColor(Color.TRANSPARENT)
+        }
+    }
+
+    // ── Core reading loop — viewport-based ────────────────────────────────────
+    // Reads screen-height chunks. For each chunk:
+    //   1. Scroll so user CAN SEE the content first
+    //   2. Wait briefly (user sees the panel)
+    //   3. OCR
+    //   4. Speak
+    //   5. Move to next chunk
+    // If no text: stop, let user scroll manually, resume from wherever they scroll to.
+
+    private suspend fun readViewportChunks() {
         val total = pageBitmaps.size
-        for (i in startIndex until total) {
-            if (!isReading) break
-            currentPageIndex = i
-            updatePageCounter(i)
-            tvStatus.text = "Scanning..."
 
-            val text = withContext(Dispatchers.IO) { recognizeText(pageBitmaps[i]) }
+        outer@ while (currentPageIndex < total) {
             if (!isReading) break
 
-            if (text.isNotBlank()) {
-                tvStatus.text = "Reading..."
-                speakAndWait(text)
-                if (!isReading) break
+            val pageIdx = currentPageIndex
+            val pageBmp = pageBitmaps[pageIdx]
+            val pageView = pagesContainer.getChildAt(pageIdx) ?: run { currentPageIndex++; continue }
 
-                if (autoScrollEnabled && i + 1 < total) {
-                    tvStatus.text = "Scrolling..."
-                    val nextView = pagesContainer.getChildAt(i + 1)
-                    if (nextView != null) animatedScrollTo(nextView.top, scrollDuration)
+            // Wait for layout
+            if (pageView.height == 0) {
+                delay(500)
+                if (pageView.height == 0) { currentPageIndex++; currentChunkOffset = 0; continue }
+            }
+
+            val pageH = pageView.height
+            val screenH = scrollView.height.coerceAtLeast(1)
+            highlightPage(pageIdx)
+            updatePageCounter(pageIdx)
+
+            var chunkOffset = currentChunkOffset
+
+            while (isReading && chunkOffset < pageH) {
+                val chunkEnd = (chunkOffset + screenH).coerceAtMost(pageH)
+
+                // ── Step 1: Scroll so content is visible BEFORE reading ──────
+                val scrollTarget = (pageView.top + chunkOffset).coerceAtLeast(0)
+                if (scrollView.scrollY != scrollTarget) {
+                    animatedScrollTo(scrollTarget, scrollDuration)
+                    // Brief pause after scroll — user can see the panel before TTS fires
+                    delay(350)
                 }
-            } else {
-                currentPageIndex = i + 1
-                updatePageCounter((i + 1).coerceAtMost(total - 1))
-                tvStatus.text = "No text. Scroll manually then tap Play"
-                isReading = false
-                btnReadPause.text = "\u25B6"
-                break
+
+                if (!isReading) break@outer
+
+                // ── Step 2: OCR the visible slice only ───────────────────────
+                val bmpH   = pageBmp.height
+                val bmpTop = ((chunkOffset.toFloat() / pageH) * bmpH).toInt().coerceIn(0, bmpH - 1)
+                val bmpEnd = ((chunkEnd.toFloat() / pageH) * bmpH).toInt().coerceIn(bmpTop + 1, bmpH)
+                val sliceH = bmpEnd - bmpTop
+
+                tvStatus.text = "Scanning..."
+                val slice = Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
+                val text  = withContext(Dispatchers.Default) { recognizeText(slice) }
+                slice.recycle()
+
+                if (!isReading) break@outer
+
+                if (text.isNotBlank()) {
+                    // ── Step 3: Speak ─────────────────────────────────────────
+                    tvStatus.text = "Reading..."
+                    speakAndWait(text)
+                    if (!isReading) break@outer
+
+                    if (autoScrollEnabled) {
+                        chunkOffset = chunkEnd
+                        currentChunkOffset = chunkOffset
+                    } else {
+                        tvStatus.text = "Scroll & tap \u25B6"
+                        isReading = false
+                        btnReadPause.text = "\u25B6"
+                        readingHighlight.visibility = View.GONE
+                        break@outer
+                    }
+                } else {
+                    // No text in this chunk: pause, let user scroll to next panel
+                    currentChunkOffset = chunkOffset
+                    tvStatus.text = "No text \u2014 scroll then \u25B6"
+                    isReading = false
+                    btnReadPause.text = "\u25B6"
+                    readingHighlight.visibility = View.GONE
+                    clearPageHighlight()
+                    break@outer
+                }
+            }
+
+            // Finished all chunks of this page
+            if (isReading) {
+                clearPageHighlight()
+                currentPageIndex++
+                currentChunkOffset = 0
             }
         }
 
@@ -315,24 +385,29 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             tvStatus.text = "Done!"
             isReading = false
             currentPageIndex = 0
+            currentChunkOffset = 0
             btnReadPause.text = "\u25B6"
+            readingHighlight.visibility = View.GONE
+            clearPageHighlight()
         }
     }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
 
     private suspend fun animatedScrollTo(targetY: Int, durationMs: Long): Unit =
         suspendCoroutine { cont ->
             val startY = scrollView.scrollY
             if (startY == targetY) { cont.resume(Unit); return@suspendCoroutine }
-            val animator = ValueAnimator.ofInt(startY, targetY).apply {
+            val anim = ValueAnimator.ofInt(startY, targetY).apply {
                 duration = durationMs
-                interpolator = DecelerateInterpolator(1.8f)
+                interpolator = DecelerateInterpolator(2f)
                 addUpdateListener { scrollView.scrollTo(0, it.animatedValue as Int) }
                 addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(animation: Animator) { cont.resume(Unit) }
-                    override fun onAnimationCancel(animation: Animator) { cont.resume(Unit) }
+                    override fun onAnimationEnd(a: Animator)    { cont.resume(Unit) }
+                    override fun onAnimationCancel(a: Animator) { cont.resume(Unit) }
                 })
             }
-            scrollView.post { animator.start() }
+            scrollView.post { anim.start() }
         }
 
     private suspend fun recognizeText(bmp: Bitmap): String = suspendCoroutine { cont ->
@@ -342,7 +417,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun speakAndWait(text: String): Unit = suspendCoroutine { cont ->
-        val uid = "page_${System.currentTimeMillis()}"
+        val uid = "chunk_${System.currentTimeMillis()}"
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
             override fun onDone(id: String?)  { if (id == uid) cont.resume(Unit) }
