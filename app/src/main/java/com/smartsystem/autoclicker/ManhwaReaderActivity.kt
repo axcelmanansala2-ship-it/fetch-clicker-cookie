@@ -510,44 +510,52 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // ── Noise filter: lines matching any of these patterns are silently skipped ──
     //
-    // 1. UI navigation overlays (SWIPE, TAP, SCROLL…)
+    // 1. Gesture / UI interaction overlays + social / nav buttons
     private val noiseUiAction = Regex(
-        """^(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH)(\s+(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH))*$""",
+        """^(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH|NEXT|PREV|PREVIOUS|HOME|BACK|FORWARD|RETRY|REFRESH|LOAD|LOADING|FOLLOW|LIKE|SHARE|SUBSCRIBE|REPORT|BOOKMARK|SAVE)(\s+(SWIPE|TAP|SCROLL|NEXT|PREV|PREVIOUS|HOME|BACK|FOLLOW|LIKE|SHARE))*$""",
         setOf(RegexOption.IGNORE_CASE)
     )
-    // 2. App/website metadata embedded in manhwa panels
+    // 2. App / website metadata embedded in manhwa panels
     //    e.g. "READ EPISODE 3125 COMMENTS: 1 VIEWS: 1"
+    //         "NEXT EPISODE"  "© 2024 WEBTOON"
     private val noiseUiMeta = Regex(
-        """(READ\s+EPISODE|COMMENTS?\s*:|\bVIEWS?\s*:|\bLIKES?\s*:|\bSUBSCRIBERS?\s*:|EPISODE\s+\d|\bCHAPTER\s+\d|\bEP\.\s*\d)""",
+        """(READ\s+EPISODE|NEXT\s+EPISODE|NEXT\s+CHAPTER|PREV(IOUS)?\s+(EPISODE|CHAPTER)|COMMENTS?\s*:|\bVIEWS?\s*:|\bLIKES?\s*:|\bSUBSCRIBERS?\s*:|EPISODE\s+\d|\bCHAPTER\s+\d|\bEP\.\s*\d|ALL\s+RIGHTS\s+RESERVED|COPYRIGHT|\bWEBTOON\b|\bTAPAS\b)""",
         setOf(RegexOption.IGNORE_CASE)
     )
     // 3. Pure SFX / onomatopoeia standing alone (not embedded in dialogue)
     private val noiseSfx = Regex(
-        """^(BOOM|BANG|CRASH|CRACK|THUD|SLAM|SMASH|WHOOSH|SWOOSH|WHACK|THWACK|CLANG|CLATTER|POP|SNAP|WHAM|POW|KABOOM|POOF|PUFF|ZAP|ZING|FWOOSH|FWOOM|BWOOM|CLUNK|BONK|BOING|CREAK|RATTLE|RUMBLE|ROAR|GROWL|HISS|SQUEAK|THUMP|GASP|SNIFF|GULP|PANT|WHEEZE|MURMUR|SHUDDER|RUSTLE|GLEAM|SPARKLE|FLASH|TREMBLE|FLICKER)(\s+(BOOM|BANG|CRASH|THUD|POP|SNAP|ZAP|POOF|WHAM|POW|GASP|SOB|HA|HEH))*$""",
+        """^(BOOM|BANG|CRASH|CRACK|THUD|SLAM|SMASH|WHOOSH|SWOOSH|WHACK|THWACK|CLANG|CLATTER|POP|SNAP|WHAM|POW|KABOOM|POOF|PUFF|ZAP|ZING|FWOOSH|FWOOM|BWOOM|CLUNK|BONK|BOING|CREAK|RATTLE|RUMBLE|ROAR|GROWL|HISS|SQUEAK|THUMP|GASP|SNIFF|GULP|PANT|WHEEZE|MURMUR|SHUDDER|RUSTLE|GLEAM|SPARKLE|FLASH|TREMBLE|FLICKER|SHING|SLASH|FWAP|THWAP|STOMP|SKID|VROOM|WHOMP|CRUNCH|MUNCH)(\s+(BOOM|BANG|CRASH|THUD|POP|SNAP|ZAP|POOF|WHAM|POW|GASP|SOB|HA|HEH|HUE))*$""",
         setOf(RegexOption.IGNORE_CASE)
     )
-    // 4. Repetitive short syllables: HA HA HA, HEH HEH HEH, SOB SOB SOB
+    // 4. Repetitive short syllables — fixed to {1,} so "HA HA" (2x) is also caught
+    //    HA HA, HA HA HA, SOB SOB, HEH HEH HEH, etc.
     private val noiseRepeat = Regex(
-        """^([A-Z]{1,5})(\s+\1){2,}$""",
+        """^([A-Z]{1,5})(\s+\1){1,}$""",
         setOf(RegexOption.IGNORE_CASE)
     )
     // 5. Text wrapped in decoration symbols: *poof*, *laughs*, [smile], [THE END]
     private val noiseSymbol = Regex(
         """^\*[^*]{1,40}\*$|^\[[^\]]{1,40}\]$"""
     )
+    // 6. Lines with ONLY punctuation / symbols — no letters or digits at all
+    //    e.g. "...", "!!!", "???", "!?", "♡", "~", "—"
+    private val noisePunctOnly = Regex(
+        """^[^a-zA-Z0-9]+$"""
+    )
 
     /**
      * Returns true if the line is visual/UI noise that should never be spoken.
-     * Covers: gesture overlays, app metadata, pure SFX, repetitive syllables,
-     * symbol-wrapped action text, and bare numeric/timestamp lines.
+     * Covers: gesture/nav overlays, app metadata, pure SFX, repetitive syllables,
+     * symbol-wrapped text, pure punctuation, and bare numeric/timestamp lines.
      */
     private fun isNoiseLine(line: String): Boolean {
         val t = line.trim()
         if (t.length <= 1) return true                    // single char — OCR artifact
-        if (noiseUiAction.matches(t)) return true         // SWIPE, TAP, SCROLL...
+        if (noisePunctOnly.matches(t)) return true        // ..., !!!, ♡, ~, —
+        if (noiseUiAction.matches(t)) return true         // SWIPE, NEXT, FOLLOW...
         if (noiseUiMeta.containsMatchIn(t)) return true   // READ EPISODE, COMMENTS:...
         if (noiseSfx.matches(t)) return true              // BOOM, CRASH, POOF...
-        if (noiseRepeat.matches(t)) return true           // HA HA HA, SOB SOB SOB...
+        if (noiseRepeat.matches(t)) return true           // HA HA, SOB SOB SOB...
         if (noiseSymbol.matches(t)) return true           // *action*, [emotion]
         // Pure numeric / timestamp / percentage (page numbers, status bar, battery)
         if (t.replace(Regex("[0-9:./%\\-\\s]"), "").isEmpty() && t.length <= 12) return true
