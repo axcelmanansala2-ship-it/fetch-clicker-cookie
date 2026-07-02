@@ -66,6 +66,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var currentPageIndex = 0
     private var currentChunkOffset = 0
     private val spokenLines = mutableSetOf<String>()
+    // Bottom-most line of the previous chunk that looked cut off mid-sentence
+    // (no ending punctuation). Held back instead of spoken so the next,
+    // overlapping chunk can bring in the rest of the sentence before it is read.
+    private var heldLine: String? = null
 
     private var ttsSpeed = 1.0f
     private var scrollDuration = 1500L
@@ -329,6 +333,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         currentPageIndex = 0
         currentChunkOffset = 0
         spokenLines.clear()
+        heldLine = null
         tvStatus.text = "Stopped"
         updatePageCounter(0)
         readingHighlight.visibility = View.GONE
@@ -419,6 +424,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         highlightPage(pageIdx)
         updatePageCounter(pageIdx)
         spokenLines.clear()  // fresh per page — prevents re-reading overlap regions
+        heldLine = null      // fresh per page — no carry-over cut-off line across pages
 
         var chunkOffset = currentChunkOffset
 
@@ -450,6 +456,26 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val allLines = text.split("\n")
                 .map { it.trim() }
                 .filter { it.isNotBlank() && !isNoiseLine(it) }
+                .toMutableList()
+
+            // The bottom-most line of a chunk may be a sentence sliced in half by the
+            // chunk/screen edge. If it doesn't end with terminal punctuation and this
+            // isn't the last chunk of the page, hold it back instead of speaking it —
+            // the next (overlapping) chunk will bring in the rest of the sentence so
+            // it gets read ONCE, in full, instead of being split into two separate
+            // readings (a broken half now + the same sentence again later).
+            val isFinalChunk = chunkEnd >= pageH
+            var heldThisRound = false
+            if (allLines.isNotEmpty()) {
+                val last = allLines.last()
+                val looksComplete = last.isEmpty() || last.last() in ".!?\u2026\"'\u201d\u2019)]"
+                if (!looksComplete && !isFinalChunk && last != heldLine) {
+                    allLines.removeAt(allLines.lastIndex)
+                    heldLine = last
+                    heldThisRound = true
+                }
+            }
+            if (!heldThisRound) heldLine = null
 
             // Only speak lines not yet spoken on this page (handles overlap re-detection)
             val newLines = allLines.filter { line -> line !in spokenLines }
@@ -460,7 +486,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 if (!isReading) return false
             }
 
-            // Mark ALL lines from this chunk as spoken (including overlap lines)
+            // Mark this chunk's lines as spoken (including overlap lines), EXCEPT the
+            // held-back cut-off line — it must stay eligible to be read once complete.
             spokenLines.addAll(allLines)
             // No new text OR all lines already read — continue scrolling
 
@@ -568,14 +595,16 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // 7. Single-word emotion / expression labels placed beside characters
     //    e.g. "SMILE", "BLUSH", "GLARE" — visual annotations, not dialogue
     private val noiseEmotion = Regex(
-        """^(SMILE|SMILING|SMIRK|SMIRKING|GRIN|GRINNING|LAUGH|LAUGHING|CHUCKLE|CHUCKLING|CRY|CRYING|WEEP|WEEPING|BLUSH|BLUSHING|WINK|WINKING|GLARE|GLARING|STARE|STARING|POUT|POUTING|YAWN|YAWNING|FREEZE|FROZEN|SHOCK|SHOCKED|SURPRISED|TREMBLING|SWEATING|SCREAMING|SHRUG|SHRUGGING|NOD|NODDING|PANIC|PANICKING|RAGE|SHIVER|SHIVERING|FIDGET|SULK|SULKING|SQUINT|SQUINTING|FROWN|FROWNING|SNIFFLE|SNIFFLING|SNEER|SNEERING|SCOFF|SCOFFING|TWITCH|TWITCHING|TENSE|TWITCHY|NERVOUS|EMBARRASSED)$""",
+        """^(SMILE|SMILING|SMIRK|SMIRKING|GRIN|GRINNING|LAUGH|LAUGHING|CHUCKLE|CHUCKLING|CRY|CRYING|WEEP|WEEPING|BLUSH|BLUSHING|WINK|WINKING|GLARE|GLARING|STARE|STARING|POUT|POUTING|YAWN|YAWNING|FREEZE|FROZEN|SHOCK|SHOCKED|SURPRISED|TREMBLING|SWEATING|SCREAMING|SHRUG|SHRUGGING|NOD|NODDING|PANIC|PANICKING|RAGE|SHIVER|SHIVERING|FIDGET|SULK|SULKING|SQUINT|SQUINTING|FROWN|FROWNING|SNIFFLE|SNIFFLING|SNEER|SNEERING|SCOFF|SCOFFING|TWITCH|TWITCHING|TENSE|TWITCHY|NERVOUS|EMBARRASSED|FLINCH|FLINCHING|WINCE|WINCING|STARTLE|STARTLED|DAZE|DAZED|PHEW|SIGH|SIGHING|GULP|GULPING)$""",
         setOf(RegexOption.IGNORE_CASE)
     )
-    // 8. Laughter/reaction without spaces: HAHA, HAHAHA, KEKE, PFFT, LOL…
+    // 8. Laughter/reaction without spaces: HAHA, HAHAHA, HEHEHE, KEKEKE, PFFT, LOL…
+    //    Fixed to {2,} repeats so 3+ syllables (HAHAHA, HEHEHEHE, KEKEKEKE, etc.)
+    //    are caught too, not just exactly two.
     //    Optional trailing punctuation (.!?~…) is allowed.
-    //    e.g. "HAHA...", "KEKEKE", "PFFT", "LOL"
+    //    e.g. "HAHA...", "HAHAHA", "KEKEKE", "PFFT", "LOL"
     private val noiseLaugh = Regex(
-        """^(A*HA+HA+|HE+HE+|HO+HO+|KE+KE+|FU+FU+|KY+A*HA+|AHA+|PFFT+|LMAO|LOL+|MUHA+|BWAHA+|GYAHA+|NYAHA+)[!?.~\u2026]*$""",
+        """^(A*(?:HA+){2,}|(?:HE+){2,}|(?:HO+){2,}|(?:KE+){2,}|(?:FU+){2,}|KY+A*HA+|AHA+|PFFT+|LMAO|LOL+|MUHA+|BWAHA+|GYAHA+|NYAHA+)[!?.~\u2026]*$""",
         setOf(RegexOption.IGNORE_CASE)
     )
 
