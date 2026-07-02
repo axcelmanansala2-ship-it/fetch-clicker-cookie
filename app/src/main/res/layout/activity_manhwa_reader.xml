@@ -2,9 +2,9 @@
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#0A0A0F">
+    android:background="#080810">
 
-    <!-- Scrollable pages area -->
+    <!-- Scrollable pages -->
     <ScrollView
         android:id="@+id/manhwaScrollView"
         android:layout_width="match_parent"
@@ -12,7 +12,6 @@
         android:scrollbars="none"
         android:overScrollMode="never"
         android:fillViewport="false">
-
         <LinearLayout
             android:id="@+id/pagesContainer"
             android:layout_width="match_parent"
@@ -20,101 +19,110 @@
             android:orientation="vertical" />
     </ScrollView>
 
-    <!-- Floating side panel (right side) -->
+    <!-- Reading highlight — subtle cyan tint over scroll area when reading -->
+    <View
+        android:id="@+id/readingHighlight"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#1800D4FF"
+        android:visibility="gone"
+        android:clickable="false"
+        android:focusable="false"
+        android:elevation="1dp" />
+
+    <!-- Floating side panel — compact, right edge -->
     <LinearLayout
-        android:layout_width="68dp"
+        android:layout_width="52dp"
         android:layout_height="wrap_content"
         android:layout_gravity="center_vertical|end"
-        android:layout_marginEnd="0dp"
         android:orientation="vertical"
-        android:background="#F0111520"
-        android:paddingTop="12dp"
-        android:paddingBottom="12dp"
-        android:paddingStart="6dp"
-        android:paddingEnd="6dp"
+        android:background="#EE0D1020"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
         android:gravity="center_horizontal"
         android:elevation="12dp">
 
         <!-- Page counter -->
         <TextView
             android:id="@+id/tvPageCount"
-            android:layout_width="56dp"
+            android:layout_width="44dp"
             android:layout_height="wrap_content"
             android:text=""
             android:textColor="@color/colorSecondary"
-            android:textSize="9sp"
+            android:textSize="8sp"
             android:textStyle="bold"
             android:gravity="center"
-            android:layout_marginBottom="2dp" />
+            android:layout_marginBottom="1dp" />
 
         <!-- Status -->
         <TextView
             android:id="@+id/tvManhwaStatus"
-            android:layout_width="56dp"
+            android:layout_width="44dp"
             android:layout_height="wrap_content"
             android:text="Loading..."
-            android:textColor="#AAFFFFFF"
-            android:textSize="7sp"
+            android:textColor="#99FFFFFF"
+            android:textSize="6sp"
             android:gravity="center"
             android:maxLines="3"
-            android:layout_marginBottom="10dp" />
+            android:layout_marginBottom="8dp" />
 
         <!-- Divider -->
         <View
-            android:layout_width="40dp"
+            android:layout_width="36dp"
             android:layout_height="1dp"
-            android:background="#33FFFFFF"
-            android:layout_marginBottom="10dp" />
+            android:background="#2AFFFFFF"
+            android:layout_marginBottom="8dp" />
 
         <!-- Play / Pause -->
         <Button
             android:id="@+id/btnReadPause"
-            android:layout_width="56dp"
-            android:layout_height="54dp"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
             android:text="&#9654;"
-            android:textSize="22sp"
+            android:textSize="18sp"
             android:backgroundTint="@color/colorSecondary"
-            android:textColor="#111520"
+            android:textColor="#080810"
             android:padding="0dp"
-            android:layout_marginBottom="6dp" />
+            android:layout_marginBottom="5dp" />
 
         <!-- Stop -->
         <Button
             android:id="@+id/btnManhwaStop"
-            android:layout_width="56dp"
-            android:layout_height="44dp"
+            android:layout_width="44dp"
+            android:layout_height="36dp"
             android:text="&#9209;"
-            android:textSize="18sp"
+            android:textSize="14sp"
             android:backgroundTint="@color/colorError"
             android:textColor="#FFFFFF"
             android:padding="0dp"
-            android:layout_marginBottom="6dp" />
+            android:layout_marginBottom="5dp" />
 
         <!-- Auto-scroll toggle -->
         <ToggleButton
             android:id="@+id/btnAutoScroll"
-            android:layout_width="56dp"
-            android:layout_height="40dp"
-            android:textOn="&#8597; ON"
-            android:textOff="&#8597; OFF"
-            android:textSize="9sp"
+            android:layout_width="44dp"
+            android:layout_height="32dp"
+            android:textOn="&#8597;ON"
+            android:textOff="&#8597;OFF"
+            android:textSize="8sp"
             android:checked="true"
             android:backgroundTint="@color/colorManhwaAccent"
-            android:textColor="#111520"
+            android:textColor="#080810"
             android:padding="0dp"
-            android:layout_marginBottom="6dp" />
+            android:layout_marginBottom="5dp" />
 
         <!-- Settings -->
         <Button
             android:id="@+id/btnSettings"
-            android:layout_width="56dp"
-            android:layout_height="40dp"
+            android:layout_width="44dp"
+            android:layout_height="32dp"
             android:text="&#9881;"
-            android:textSize="18sp"
-            android:backgroundTint="#2A2D40"
+            android:textSize="14sp"
+            android:backgroundTint="#1E2235"
             android:textColor="#AAFFFFFF"
             android:padding="0dp" />
 
     </LinearLayout>
-
 </FrameLayout>
