@@ -464,18 +464,26 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // the next (overlapping) chunk will bring in the rest of the sentence so
             // it gets read ONCE, in full, instead of being split into two separate
             // readings (a broken half now + the same sentence again later).
+            //
+            // IMPORTANT: only hold back for a SINGLE chunk. OCR text can vary slightly
+            // between chunks (spacing, capitalization, minor misreads), so comparing
+            // exact strings to detect "already held" is unreliable and can silently
+            // drop a sentence forever (it gets held, replaced by a slightly different
+            // held value next chunk, and the original is never spoken). Capping the
+            // hold at one chunk guarantees every line is eventually spoken.
             val isFinalChunk = chunkEnd >= pageH
-            var heldThisRound = false
-            if (allLines.isNotEmpty()) {
+            if (allLines.isNotEmpty() && heldLine == null) {
                 val last = allLines.last()
                 val looksComplete = last.isEmpty() || last.last() in ".!?\u2026\"'\u201d\u2019)]"
-                if (!looksComplete && !isFinalChunk && last != heldLine) {
+                if (!looksComplete && !isFinalChunk) {
                     allLines.removeAt(allLines.lastIndex)
                     heldLine = last
-                    heldThisRound = true
-                }
+                } 
+            } else {
+                // Either nothing to hold, or we already held one chunk's worth —
+                // force everything through this round so nothing is lost.
+                heldLine = null
             }
-            if (!heldThisRound) heldLine = null
 
             // Only speak lines not yet spoken on this page (handles overlap re-detection)
             val newLines = allLines.filter { line -> line !in spokenLines }
@@ -574,7 +582,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     )
     // 3. Pure SFX / onomatopoeia standing alone (not embedded in dialogue)
     private val noiseSfx = Regex(
-        """^(BOOM|BANG|CRASH|CRACK|THUD|SLAM|SMASH|WHOOSH|SWOOSH|WHACK|THWACK|CLANG|CLATTER|POP|SNAP|WHAM|POW|KABOOM|POOF|PUFF|ZAP|ZING|FWOOSH|FWOOM|BWOOM|CLUNK|BONK|BOING|CREAK|RATTLE|RUMBLE|ROAR|GROWL|HISS|SQUEAK|THUMP|GASP|SNIFF|GULP|PANT|WHEEZE|MURMUR|SHUDDER|RUSTLE|GLEAM|SPARKLE|FLASH|TREMBLE|FLICKER|SHING|SLASH|FWAP|THWAP|STOMP|SKID|VROOM|WHOMP|CRUNCH|MUNCH)(\s+(BOOM|BANG|CRASH|THUD|POP|SNAP|ZAP|POOF|WHAM|POW|GASP|SOB|HA|HEH|HUE))*$""",
+        """^(BOOM|BANG|CRASH|CRACK|THUD|SLAM|SMASH|WHOOSH|SWOOSH|WHACK|THWACK|CLANG|CLATTER|POP|SNAP|WHAM|POW|KABOOM|POOF|PUFF|ZAP|ZING|FWOOSH|FWOOM|BWOOM|CLUNK|BONK|BOING|CREAK|RATTLE|RUMBLE|ROAR|GROWL|HISS|SQUEAK|THUMP|GASP|SNIFF|GULP|PANT|WHEEZE|MURMUR|SHUDDER|RUSTLE|GLEAM|SPARKLE|FLASH|TREMBLE|FLICKER|SHING|SLASH|FWAP|THWAP|STOMP|SKID|VROOM|WHOMP|CRUNCH|MUNCH|DING|DONG|BEEP|BUZZ|RING|CHIME|KNOCK|TICK|TOCK|TICKTOCK|SPLASH|SPLOSH|DRIP|PLOP|SIZZLE|CRACKLE|SLURP|CHOMP|GULP|SLURRRP|SCREECH|SHRIEK|HOWL|CHIRP|TWEET|MEOW|WOOF|NEIGH|OINK|MOO|BAABAA|CLOP|JINGLE|CLINK|TING|WHIR|HUM|BUZZ|SPARK|CRACKLE|FIZZ|GURGLE|SLOSH)(\s+(BOOM|BANG|CRASH|THUD|POP|SNAP|ZAP|POOF|WHAM|POW|GASP|SOB|HA|HEH|HUE))*$""",
         setOf(RegexOption.IGNORE_CASE)
     )
     // 4. Repetitive short syllables — fixed to {1,} so "HA HA" (2x) is also caught
