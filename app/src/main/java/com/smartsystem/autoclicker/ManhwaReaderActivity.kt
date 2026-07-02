@@ -508,19 +508,53 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .addOnFailureListener { cont.resume("") }
     }
 
-    // UI overlay words found in manhwa tutorial/demo panels — skip these, never read aloud.
-    // Matches standalone action words like SWIPE, TAP, SCROLL (case-insensitive, whole line).
-    private val uiNoiseRegex = Regex(
-        """^(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH)(\\s+(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH))*$""",
+    // ── Noise filter: lines matching any of these patterns are silently skipped ──
+    //
+    // 1. UI navigation overlays (SWIPE, TAP, SCROLL…)
+    private val noiseUiAction = Regex(
+        """^(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH)(\s+(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH))*$""",
         setOf(RegexOption.IGNORE_CASE)
     )
+    // 2. App/website metadata embedded in manhwa panels
+    //    e.g. "READ EPISODE 3125 COMMENTS: 1 VIEWS: 1"
+    private val noiseUiMeta = Regex(
+        """(READ\s+EPISODE|COMMENTS?\s*:|\bVIEWS?\s*:|\bLIKES?\s*:|\bSUBSCRIBERS?\s*:|EPISODE\s+\d|\bCHAPTER\s+\d|\bEP\.\s*\d)""",
+        setOf(RegexOption.IGNORE_CASE)
+    )
+    // 3. Pure SFX / onomatopoeia standing alone (not embedded in dialogue)
+    private val noiseSfx = Regex(
+        """^(BOOM|BANG|CRASH|CRACK|THUD|SLAM|SMASH|WHOOSH|SWOOSH|WHACK|THWACK|CLANG|CLATTER|POP|SNAP|WHAM|POW|KABOOM|POOF|PUFF|ZAP|ZING|FWOOSH|FWOOM|BWOOM|CLUNK|BONK|BOING|CREAK|RATTLE|RUMBLE|ROAR|GROWL|HISS|SQUEAK|THUMP|GASP|SNIFF|GULP|PANT|WHEEZE|MURMUR|SHUDDER|RUSTLE|GLEAM|SPARKLE|FLASH|TREMBLE|FLICKER)(\s+(BOOM|BANG|CRASH|THUD|POP|SNAP|ZAP|POOF|WHAM|POW|GASP|SOB|HA|HEH))*$""",
+        setOf(RegexOption.IGNORE_CASE)
+    )
+    // 4. Repetitive short syllables: HA HA HA, HEH HEH HEH, SOB SOB SOB
+    private val noiseRepeat = Regex(
+        """^([A-Z]{1,5})(\s+\1){2,}$""",
+        setOf(RegexOption.IGNORE_CASE)
+    )
+    // 5. Text wrapped in decoration symbols: *poof*, *laughs*, [smile], [THE END]
+    private val noiseSymbol = Regex(
+        """^\*[^*]{1,40}\*$|^\[[^\]]{1,40}\]$"""
+    )
+
+    /**
+     * Returns true if the line is visual/UI noise that should never be spoken.
+     * Covers: gesture overlays, app metadata, pure SFX, repetitive syllables,
+     * symbol-wrapped action text, and bare numeric/timestamp lines.
+     */
     private fun isNoiseLine(line: String): Boolean {
         val t = line.trim()
-        if (t.length <= 1) return true   // single char — OCR artifact
-        return uiNoiseRegex.matches(t)
+        if (t.length <= 1) return true                    // single char — OCR artifact
+        if (noiseUiAction.matches(t)) return true         // SWIPE, TAP, SCROLL...
+        if (noiseUiMeta.containsMatchIn(t)) return true   // READ EPISODE, COMMENTS:...
+        if (noiseSfx.matches(t)) return true              // BOOM, CRASH, POOF...
+        if (noiseRepeat.matches(t)) return true           // HA HA HA, SOB SOB SOB...
+        if (noiseSymbol.matches(t)) return true           // *action*, [emotion]
+        // Pure numeric / timestamp / percentage (page numbers, status bar, battery)
+        if (t.replace(Regex("[0-9:./%\\-\\s]"), "").isEmpty() && t.length <= 12) return true
+        return false
     }
 
-    // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
+        // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
     // as words, never as abbreviations spelled letter-by-letter.
     // DOKJA -> dokja, AXCEL -> axcel, RATTLE -> rattle
     // Single uppercase letters (pronoun 'I') are left unchanged.
