@@ -5,33 +5,28 @@ import android.graphics.PointF
 import android.util.Log
 
 /**
- * Detects CODM bullseye targets via color-based pixel scanning.
- *
- * v2 fixes:
- *  - Stricter color threshold: only pure saturated red (R>200, G<55, B<55)
- *    eliminates false positives from orange containers, red buildings, CODM logo
- *  - Tighter ROI: center strip only (x 22-72%, y 18-70%)
- *    cuts out the right-side shipping container and bottom HUD
- *  - Max cluster cap: clusters > MAX_CLUSTER_PX treated as background objects
- *  - Requires 2 consecutive detections before reporting a hit (reduces reaction to noise)
+ * v3 fixes:
+ *  - Looser color threshold: R>150, G<90, B<80
+ *    Catches low-quality compressed bullseye reds that v2 missed (was R>200 — too strict)
+ *  - MAX_CLUSTER_PX still filters out the large red container
+ *  - ROI_RIGHT widened to 0.78 (catches right-side targets that were cut off)
+ *  - Consecutive requirement dropped to 1 (max cluster cap is now the primary noise guard)
  */
 object BullseyeDetector {
 
-    private const val TAG = "BullseyeDetector"
-    private const val SAMPLE_SCALE   = 4    // scan at 1/4 resolution
-    private const val MIN_CLUSTER_PX = 5    // too few pixels = noise
-    private const val MAX_CLUSTER_PX = 180  // too many pixels = background object (container, building)
+    private const val TAG            = "BullseyeDetector"
+    private const val SAMPLE_SCALE   = 4
+    private const val MIN_CLUSTER_PX = 5
+    private const val MAX_CLUSTER_PX = 160  // large red objects (container) still blocked
     private const val CLUSTER_RADIUS = 7
 
-    // Tighter ROI — cuts out right-side container, CODM logo, and HUD strips
-    private const val ROI_LEFT   = 0.22f
-    private const val ROI_RIGHT  = 0.72f   // was 0.90 — now excludes right container area
-    private const val ROI_TOP    = 0.18f
-    private const val ROI_BOTTOM = 0.70f   // was 0.85 — now excludes bottom HUD
+    private const val ROI_LEFT   = 0.18f
+    private const val ROI_RIGHT  = 0.78f   // widened — was 0.72, right targets were cut off
+    private const val ROI_TOP    = 0.15f
+    private const val ROI_BOTTOM = 0.72f
 
-    // Consecutive-detection requirement before reporting (reduces noise reactions)
     private var consecutiveHits = 0
-    private const val REQUIRED_CONSECUTIVE = 2
+    private const val REQUIRED_CONSECUTIVE = 1  // dropped from 2 — max cluster cap handles noise
 
     data class DetectionResult(
         val center: PointF,
@@ -39,7 +34,6 @@ object BullseyeDetector {
         val distanceFromCenter: Float
     )
 
-    /** Scan [bitmap] for bullseye. Returns coords in original pixel space, or null. */
     fun detect(bitmap: Bitmap): DetectionResult? {
         val origW = bitmap.width
         val origH = bitmap.height
@@ -73,33 +67,28 @@ object BullseyeDetector {
         }
 
         consecutiveHits++
-        if (consecutiveHits < REQUIRED_CONSECUTIVE) return null   // wait for next frame to confirm
+        if (consecutiveHits < REQUIRED_CONSECUTIVE) return null
 
         val cx = best.first.x * SAMPLE_SCALE.toFloat()
         val cy = best.first.y * SAMPLE_SCALE.toFloat()
-        val dist = Math.hypot(
-            (cx - origW / 2.0),
-            (cy - origH / 2.0)
-        ).toFloat()
+        val dist = Math.hypot((cx - origW / 2.0), (cy - origH / 2.0)).toFloat()
 
-        Log.d(TAG, "Bullseye confirmed at ($cx,$cy) cluster=${best.second} dist=$dist hits=$consecutiveHits")
+        Log.d(TAG, "Bullseye at ($cx,$cy) cluster=${best.second} dist=$dist")
         return DetectionResult(PointF(cx, cy), best.second, dist)
     }
 
-    /** Reset consecutive counter (call when service stops). */
     fun reset() { consecutiveHits = 0 }
 
     /**
-     * Strict red-only threshold.
-     * Excludes orange (high G), pink (high B), and dark reds to avoid
-     * containers, UI elements, and the CODM red logo.
+     * v3 color: R>150, G<90, B<80
+     * Catches compressed/low-quality reds that v2 missed.
+     * MAX_CLUSTER_PX cap compensates for the looser threshold.
      */
     private fun isTargetColor(px: Int): Boolean {
         val r = (px shr 16) and 0xFF
         val g = (px shr 8)  and 0xFF
         val b =  px         and 0xFF
-        // Pure saturated red only — bullseye center circle color
-        return r > 200 && g < 55 && b < 55
+        return r > 150 && g < 90 && b < 80
     }
 
     private fun findDensestCluster(
