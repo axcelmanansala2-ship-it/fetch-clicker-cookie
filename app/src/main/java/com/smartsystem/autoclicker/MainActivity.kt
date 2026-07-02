@@ -41,13 +41,15 @@ class MainActivity : AppCompatActivity() {
         binding.btnStartService.setOnClickListener { startOverlayService() }
         binding.btnStopService.setOnClickListener { stopOverlayService() }
 
-        // NEW: Account Checker
         binding.btnAccountChecker.setOnClickListener {
             startActivity(Intent(this, AccountCheckerActivity::class.java))
         }
 
-        // NEW: SSO Key Service
         binding.btnSsoKey.setOnClickListener { toggleSsoService() }
+
+        binding.btnManhwaReader.setOnClickListener {
+            startActivity(Intent(this, ManhwaReaderActivity::class.java))
+        }
     }
 
     private fun toggleSsoService() {
