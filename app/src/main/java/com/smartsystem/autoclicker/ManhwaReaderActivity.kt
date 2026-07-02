@@ -20,7 +20,7 @@ import android.speech.tts.UtteranceProgressListener
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -62,6 +62,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private var currentPageIndex = 0
     private var currentChunkOffset = 0
+    private var lastSpokenText = ""
 
     private var ttsSpeed = 1.0f
     private var scrollDuration = 1500L
@@ -155,7 +156,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         try {
             fd = openPdfDescriptor(uri) ?: return emptyList()
             renderer = PdfRenderer(fd)
-            val targetWidth = minOf(resources.displayMetrics.widthPixels, 640)
+            val targetWidth = minOf(resources.displayMetrics.widthPixels, 720)
             for (i in 0 until renderer.pageCount) {
                 val page = renderer.openPage(i)
                 val scale = targetWidth.toFloat() / page.width.coerceAtLeast(1)
@@ -283,6 +284,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         btnReadPause.text = "\u25B6"
         currentPageIndex = 0
         currentChunkOffset = 0
+        lastSpokenText = ""
         tvStatus.text = "Stopped"
         updatePageCounter(0)
         readingHighlight.visibility = View.GONE
@@ -316,25 +318,31 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    // ── Core reading: outer loop over pages ───────────────────────────────────
+    // ── Core reading loop ────────────────────────────────────────────────────
+    // FULL AUTO-SCROLL: never stops automatically. Scrolls continuously through
+    // every chunk (with overlap so no text is missed at chunk boundaries).
+    // Whenever text is detected in the visible chunk, it pauses scrolling just
+    // long enough to speak it, then resumes scrolling. Panels with no text are
+    // skipped instantly — no waiting for the user.
 
     private suspend fun readAllPages() {
         while (isReading && currentPageIndex < pageBitmaps.size) {
             val pageCompleted = readCurrentPage()
-            if (!pageCompleted) return  // paused / stopped / no-text
+            if (!pageCompleted) return  // manually paused / stopped
         }
         if (isReading) {
             tvStatus.text = "Done!"
             isReading = false
             currentPageIndex = 0
             currentChunkOffset = 0
+            lastSpokenText = ""
             btnReadPause.text = "\u25B6"
             readingHighlight.visibility = View.GONE
             clearPageHighlight()
         }
     }
 
-    // Returns true if page was fully read, false if paused/stopped/no-text
+    // Returns true if page was fully traversed, false if paused/stopped mid-way
     private suspend fun readCurrentPage(): Boolean {
         val pageIdx = currentPageIndex
         val pageBmp = pageBitmaps.getOrNull(pageIdx) ?: run {
@@ -359,6 +367,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         val pageH   = pageView.height
         val screenH = scrollView.height.coerceAtLeast(1)
+        // 20% overlap between consecutive chunks so text sitting on a boundary
+        // is never split/missed between two reads
+        val overlap = (screenH * 0.2f).toInt().coerceAtLeast(1)
+        val step = (screenH - overlap).coerceAtLeast(1)
 
         highlightPage(pageIdx)
         updatePageCounter(pageIdx)
@@ -368,16 +380,15 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         while (isReading && chunkOffset < pageH) {
             val chunkEnd = if (chunkOffset + screenH < pageH) chunkOffset + screenH else pageH
 
-            // 1) Scroll so user sees the content BEFORE TTS fires
+            // Scroll so content becomes visible before it is read
             val scrollTarget = if (pageView.top + chunkOffset > 0) pageView.top + chunkOffset else 0
             if (scrollView.scrollY != scrollTarget) {
                 animatedScrollTo(scrollTarget, scrollDuration)
-                delay(350)  // let user see the panel before reading starts
             }
 
             if (!isReading) return false
 
-            // 2) OCR only the visible slice of this page's bitmap
+            // OCR the visible slice (with overlap already baked into chunkOffset math)
             val bmpH   = pageBmp.height
             val bmpTop = ((chunkOffset.toFloat() / pageH) * bmpH).toInt().let { if (it < 0) 0 else if (it >= bmpH) bmpH - 1 else it }
             val bmpEnd = ((chunkEnd.toFloat() / pageH) * bmpH).toInt().let { if (it <= bmpTop) bmpTop + 1 else if (it > bmpH) bmpH else it }
@@ -390,32 +401,31 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             if (!isReading) return false
 
-            if (text.isNotBlank()) {
-                // 3) Speak the text
-                tvStatus.text = "Reading..."
-                speakAndWait(text)
-                if (!isReading) return false
+            val cleanText = text.trim()
+            val isDuplicate = cleanText.isNotBlank() &&
+                (cleanText == lastSpokenText ||
+                 lastSpokenText.contains(cleanText) ||
+                 cleanText.contains(lastSpokenText))
 
-                if (autoScrollEnabled) {
-                    chunkOffset = chunkEnd
-                    currentChunkOffset = chunkOffset
-                } else {
-                    tvStatus.text = "Scroll & tap \u25B6"
-                    isReading = false
-                    btnReadPause.text = "\u25B6"
-                    readingHighlight.visibility = View.GONE
-                    return false
-                }
-            } else {
-                // No text in this visible chunk — stop, let user scroll manually
-                currentChunkOffset = chunkOffset
-                tvStatus.text = "No text \u2014 scroll then \u25B6"
+            if (cleanText.isNotBlank() && !isDuplicate) {
+                tvStatus.text = "Reading..."
+                lastSpokenText = cleanText
+                speakAndWait(cleanText)
+                if (!isReading) return false
+            }
+            // No text OR duplicate (overlap re-read) — do NOT stop, just continue
+
+            if (!autoScrollEnabled) {
+                tvStatus.text = "Scroll & tap \u25B6"
                 isReading = false
                 btnReadPause.text = "\u25B6"
                 readingHighlight.visibility = View.GONE
-                clearPageHighlight()
                 return false
             }
+
+            // Always advance — full auto scroll never halts on empty panels
+            chunkOffset += step
+            currentChunkOffset = chunkOffset
         }
 
         // All chunks of this page done
@@ -433,7 +443,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (startY == targetY) { cont.resume(Unit); return@suspendCoroutine }
             val anim = ValueAnimator.ofInt(startY, targetY).apply {
                 duration = durationMs
-                interpolator = DecelerateInterpolator(2f)
+                interpolator = LinearInterpolator()
                 addUpdateListener { anim -> scrollView.scrollTo(0, anim.animatedValue as Int) }
                 addListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(a: Animator)    { cont.resume(Unit) }
