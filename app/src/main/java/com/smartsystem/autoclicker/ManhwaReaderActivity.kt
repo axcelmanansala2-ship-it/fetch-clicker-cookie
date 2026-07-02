@@ -17,6 +17,7 @@ import android.os.Bundle
 import android.os.ParcelFileDescriptor
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -24,9 +25,11 @@ import android.view.animation.LinearInterpolator
 import android.widget.Button
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ArrayAdapter
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
+import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import android.widget.ToggleButton
@@ -66,6 +69,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private var ttsSpeed = 1.0f
     private var scrollDuration = 1500L
+    private var selectedVoice: Voice? = null
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
@@ -203,11 +207,13 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         var curScrollIdx = 2
         for (i in scrollValues.indices) { if (scrollValues[i] == scrollDuration) { curScrollIdx = i; break } }
 
-        val layout = LinearLayout(this).apply {
+        val innerLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(56, 32, 56, 16)
         }
-        layout.addView(TextView(this).apply {
+
+        // ── Reading Speed ──
+        innerLayout.addView(TextView(this).apply {
             text = "Reading Speed"
             textSize = 13f
             setTypeface(null, Typeface.BOLD)
@@ -221,9 +227,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             rb.isChecked = (i == curSpeedIdx)
             speedGroup.addView(rb)
         }
-        layout.addView(speedGroup)
+        innerLayout.addView(speedGroup)
 
-        layout.addView(TextView(this).apply {
+        // ── Scroll Speed ──
+        innerLayout.addView(TextView(this).apply {
             text = "Auto-Scroll Speed"
             textSize = 13f
             setTypeface(null, Typeface.BOLD)
@@ -237,11 +244,41 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             rb.isChecked = (i == curScrollIdx)
             scrollGroup.addView(rb)
         }
-        layout.addView(scrollGroup)
+        innerLayout.addView(scrollGroup)
+
+        // ── Voice ── (show all English voices from the device TTS engine)
+        val englishVoices = tts?.voices
+            ?.filter { v -> v.locale.language == "en" }
+            ?.sortedBy { it.name }
+            ?: emptyList()
+        var voiceSpinner: Spinner? = null
+        if (englishVoices.isNotEmpty()) {
+            innerLayout.addView(TextView(this).apply {
+                text = "Voice"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                setPadding(0, 20, 0, 4)
+            })
+            val spinner = Spinner(this)
+            val voiceNames = englishVoices.map { v ->
+                val tag = v.locale.toLanguageTag()
+                "${v.name.replace(Regex("[-_]"), " ")} ($tag)"
+            }
+            val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, voiceNames)
+            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            spinner.adapter = adapter
+            val curVoiceIdx = englishVoices.indexOfFirst { it.name == selectedVoice?.name }.coerceAtLeast(0)
+            spinner.setSelection(curVoiceIdx)
+            innerLayout.addView(spinner)
+            voiceSpinner = spinner
+        }
+
+        // Wrap in ScrollView so the dialog is scrollable on small screens
+        val dialogScroll = ScrollView(this).apply { addView(innerLayout) }
 
         AlertDialog.Builder(this)
             .setTitle("Reader Settings")
-            .setView(layout)
+            .setView(dialogScroll)
             .setPositiveButton("Apply") { _, _ ->
                 val si = speedGroup.checkedRadioButtonId - 100
                 if (si in speedValues.indices) {
@@ -250,6 +287,13 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
                 val sc = scrollGroup.checkedRadioButtonId - 200
                 if (sc in scrollValues.indices) scrollDuration = scrollValues[sc]
+                voiceSpinner?.let { sp ->
+                    val vi = sp.selectedItemPosition
+                    if (vi in englishVoices.indices) {
+                        selectedVoice = englishVoices[vi]
+                        tts?.voice = selectedVoice
+                    }
+                }
             }
             .setNegativeButton("Cancel", null)
             .show()
@@ -402,10 +446,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             if (!isReading) return false
 
-            // Split OCR result into individual lines
+            // Split OCR result; skip blank lines and UI noise overlays (SWIPE, TAP, etc.)
             val allLines = text.split("\n")
                 .map { it.trim() }
-                .filter { it.isNotBlank() }
+                .filter { it.isNotBlank() && !isNoiseLine(it) }
 
             // Only speak lines not yet spoken on this page (handles overlap re-detection)
             val newLines = allLines.filter { line -> line !in spokenLines }
@@ -462,6 +506,18 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         recognizer.process(InputImage.fromBitmap(bmp, 0))
             .addOnSuccessListener { result -> cont.resume(result.text) }
             .addOnFailureListener { cont.resume("") }
+    }
+
+    // UI overlay words found in manhwa tutorial/demo panels — skip these, never read aloud.
+    // Matches standalone action words like SWIPE, TAP, SCROLL (case-insensitive, whole line).
+    private val uiNoiseRegex = Regex(
+        """^(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH)(\\s+(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH))*$""",
+        setOf(RegexOption.IGNORE_CASE)
+    )
+    private fun isNoiseLine(line: String): Boolean {
+        val t = line.trim()
+        if (t.length <= 1) return true   // single char — OCR artifact
+        return uiNoiseRegex.matches(t)
     }
 
     // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
