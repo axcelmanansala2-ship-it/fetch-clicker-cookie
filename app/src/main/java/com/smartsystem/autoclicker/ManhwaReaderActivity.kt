@@ -42,6 +42,7 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.*
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
 import kotlin.math.atan2
@@ -846,14 +847,21 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         withTimeoutOrNull(60_000L) {
             suspendCancellableCoroutine<Unit> { cont ->
                 val uid = "chunk_${System.currentTimeMillis()}"
+                // AtomicBoolean guard prevents multiple cont.resume() calls.
+                // onDone, onError, and the speak()==ERROR fast-path can all fire
+                // within the same tick; resuming an already-completed continuation
+                // throws IllegalStateException and crashes the coroutine.
+                val done = AtomicBoolean(false)
+                fun finishOnce() { if (done.compareAndSet(false, true)) cont.resume(Unit) }
+
                 tts!!.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(id: String?) {}
-                    override fun onDone(id: String?)  { if (id == uid) cont.resume(Unit) }
-                    override fun onError(id: String?) { if (id == uid) cont.resume(Unit) }
+                    override fun onDone(id: String?)  { if (id == uid) finishOnce() }
+                    override fun onError(id: String?) { if (id == uid) finishOnce() }
                 })
                 val result = tts!!.speak(text, TextToSpeech.QUEUE_FLUSH, null, uid)
                 // speak() returning ERROR means the callback will never fire — resume now.
-                if (result == TextToSpeech.ERROR) cont.resume(Unit)
+                if (result == TextToSpeech.ERROR) finishOnce()
                 // If the coroutine is cancelled (user hits Stop/Pause), stop TTS immediately
                 // so audio cuts off at once instead of finishing the current utterance.
                 cont.invokeOnCancellation { tts?.stop() }
