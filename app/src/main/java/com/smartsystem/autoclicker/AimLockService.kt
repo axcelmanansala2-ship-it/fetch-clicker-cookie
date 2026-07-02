@@ -16,6 +16,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
@@ -34,18 +35,16 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Aim Lock Service — detects moving bullseye targets via screen capture + color analysis,
- * then automatically adjusts the CODM crosshair using swipe gestures on the aim zone.
+ * Aim Lock Service — v2 fixes:
  *
- * Flow:
- *  1. Started from MainActivity after user grants MediaProjection permission
- *  2. Creates ScreenCaptureManager to grab screen frames at ~12 fps
- *  3. BullseyeDetector finds the red/orange target position in each frame
- *  4. Calculates pixel offset from screen center (crosshair) to target
- *  5. Performs a proportional swipe on the right aim zone to snap crosshair onto target
+ * Fix 1 — Input blocking:
+ *   - 350ms minimum cooldown between swipes (was 0ms — flooded CODM with gestures)
+ *   - Polling slowed to 120ms (was 80ms)
+ *   - After a swipe, skip the next 2 poll cycles (gives user ~240ms of free input)
  *
- * Aim zone (CODM FPS mode): right portion of screen — drag here rotates camera.
- * Drag origin: 75% x, 50% y  (tuned for CODM default right-stick layout)
+ * Fix 2 — False lock-on:
+ *   - Only swipes when BullseyeDetector confirms 2 consecutive frames (already in detector)
+ *   - Only swipes if crosshair offset > 12px (was 5px — too sensitive)
  */
 class AimLockService : Service() {
 
@@ -60,6 +59,10 @@ class AimLockService : Service() {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var aimJob: Job? = null
     private var isRunning = false
+
+    // Cooldown tracking — prevents gesture flooding that blocks user input
+    private var lastSwipeTime = 0L
+    private var skipCycles = 0
 
     override fun onCreate() {
         super.onCreate()
@@ -87,16 +90,12 @@ class AimLockService : Service() {
                 val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = mgr.getMediaProjection(resultCode, data)
                 mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-                    override fun onStop() {
-                        screenCapture?.release()
-                        screenCapture = null
-                    }
+                    override fun onStop() { screenCapture?.release(); screenCapture = null }
                 }, null)
                 screenCapture = ScreenCaptureManager(this, mediaProjection!!)
                 Log.d(TAG, "MediaProjection ready")
                 updateOverlay("Ready", "Tap START")
             } else {
-                Log.w(TAG, "No valid MediaProjection data")
                 Toast.makeText(this, "Screen capture permission needed", Toast.LENGTH_SHORT).show()
             }
         }
@@ -105,6 +104,7 @@ class AimLockService : Service() {
 
     override fun onDestroy() {
         stopAimLock()
+        BullseyeDetector.reset()
         screenCapture?.release()
         mediaProjection?.stop()
         if (::overlayView.isInitialized) {
@@ -187,6 +187,8 @@ class AimLockService : Service() {
         }
 
         isRunning = true
+        skipCycles = 0
+        BullseyeDetector.reset()
         updateOverlay("Scanning…", "")
 
         aimJob = scope.launch {
@@ -195,8 +197,14 @@ class AimLockService : Service() {
             val screenH = resources.displayMetrics.heightPixels.toFloat()
 
             while (isActive && isRunning) {
-                val bitmap = withContext(Dispatchers.IO) { screenCapture?.captureScreen() }
+                // If we just fired a swipe, skip a couple cycles to let user input through
+                if (skipCycles > 0) {
+                    skipCycles--
+                    delay(POLL_MS)
+                    continue
+                }
 
+                val bitmap = withContext(Dispatchers.IO) { screenCapture?.captureScreen() }
                 if (bitmap == null) { delay(POLL_MS); continue }
 
                 val result = withContext(Dispatchers.Default) { BullseyeDetector.detect(bitmap) }
@@ -208,16 +216,21 @@ class AimLockService : Service() {
                     val dy = result.center.y - screenH / 2f
 
                     withContext(Dispatchers.Main) {
-                        updateOverlay("Locked!", "Δ(${dx.toInt()}, ${dy.toInt()})")
+                        updateOverlay("Locked!", "Δ(${dx.toInt()},${dy.toInt()})")
                     }
 
-                    // Only nudge if offset is more than 5px
-                    if (Math.abs(dx) > 5f || Math.abs(dy) > 5f) {
+                    val now = SystemClock.elapsedRealtime()
+                    val offsetBig = Math.abs(dx) > MIN_OFFSET_PX || Math.abs(dy) > MIN_OFFSET_PX
+                    val cooldownOk = (now - lastSwipeTime) >= SWIPE_COOLDOWN_MS
+
+                    if (offsetBig && cooldownOk) {
                         performAimSwipe(screenW, screenH, dx, dy)
+                        lastSwipeTime = now
+                        skipCycles = POST_SWIPE_SKIP   // give user free input after each swipe
                     }
                 } else {
                     missCount++
-                    if (missCount > 5) {
+                    if (missCount > 4) {
                         withContext(Dispatchers.Main) { updateOverlay("Scanning…", "") }
                     }
                 }
@@ -231,16 +244,13 @@ class AimLockService : Service() {
         aimJob?.cancel()
         aimJob = null
         isRunning = false
+        skipCycles = 0
+        BullseyeDetector.reset()
         updateOverlay("Stopped", "")
     }
 
     // ─── Aim Swipe Gesture ────────────────────────────────────────────────────
 
-    /**
-     * Swipe on the right aim zone to rotate camera toward the detected target.
-     * Origin: fixed at [AIM_ORIGIN_X, AIM_ORIGIN_Y] of screen.
-     * Delta: target offset × sensitivity (tunable).
-     */
     private fun performAimSwipe(screenW: Float, screenH: Float, dx: Float, dy: Float) {
         val svc = AutoClickAccessibilityService.instance ?: return
 
@@ -278,14 +288,17 @@ class AimLockService : Service() {
     }
 
     companion object {
-        private const val TAG             = "AimLockService"
-        private const val NOTIF_ID        = 1004
-        private const val NOTIF_CHANNEL   = "aim_lock"
-        private const val POLL_MS         = 80L     // ~12 fps
-        private const val SWIPE_DURATION_MS = 50L
-        private const val SENSITIVITY     = 0.25f   // swipe px per target-offset px
-        private const val AIM_ORIGIN_X    = 0.75f   // right aim zone x
-        private const val AIM_ORIGIN_Y    = 0.50f   // right aim zone y
+        private const val TAG              = "AimLockService"
+        private const val NOTIF_ID         = 1004
+        private const val NOTIF_CHANNEL    = "aim_lock"
+        private const val POLL_MS          = 120L   // slowed from 80ms → less input pressure
+        private const val SWIPE_DURATION_MS = 60L
+        private const val SWIPE_COOLDOWN_MS = 350L  // min ms between swipes
+        private const val POST_SWIPE_SKIP  = 2      // skip N cycles after each swipe (~240ms free)
+        private const val MIN_OFFSET_PX    = 12f    // raised from 5px → less jitter
+        private const val SENSITIVITY      = 0.28f
+        private const val AIM_ORIGIN_X     = 0.75f
+        private const val AIM_ORIGIN_Y     = 0.50f
 
         const val ACTION_STOP           = "com.smartsystem.autoclicker.AIM_STOP"
         const val EXTRA_RESULT_CODE     = "extra_result_code"
