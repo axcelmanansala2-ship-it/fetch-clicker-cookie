@@ -462,16 +462,21 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val slice = Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
 
             tvStatus.text = "Scanning..."
-            val text = coroutineScope {
-                val ocrDeferred = async(Dispatchers.Default) { recognizeText(slice) }
-                if (scrollView.scrollY != scrollTarget) {
-                    animatedScrollTo(scrollTarget, scrollDuration)
-                }
-                ocrDeferred.await()
-            }
+            // Fire the scroll animation in the background instead of waiting for it
+            // to finish before reading — previously this call blocked here for the
+            // full scrollDuration (e.g. 1.5s) even when OCR/text was ready almost
+            // instantly, which is exactly the "delay before it reads" lag. Now
+            // speech starts the moment OCR completes, while the scroll keeps
+            // animating underneath it; we only wait for the scroll to truly finish
+            // right before computing the NEXT chunk's target, so animations never
+            // overlap/collide with each other.
+            val scrollJob: Job? = if (scrollView.scrollY != scrollTarget) {
+                lifecycleScope.launch { animatedScrollTo(scrollTarget, scrollDuration) }
+            } else null
+            val text = recognizeText(slice)
             slice.recycle()
 
-            if (!isReading) return false
+            if (!isReading) { scrollJob?.cancel(); return false }
 
             // Skip blank lines, known UI/SFX noise words, anything drawn at an angle
             // (tilted/curved text), AND text that is noticeably smaller than the
@@ -493,31 +498,37 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 .map { it.text }
                 .toMutableList()
 
+            // A phrase held back from the PREVIOUS chunk (cut off by the screen edge)
+            // must be brought back in now, or it is silently lost forever. The
+            // overlapping scroll region normally re-detects the same bubble as a
+            // single, now-complete line — if so, that merged line already contains
+            // the held text plus its continuation, so we just let it through as-is.
+            // If no matching line is found this round (OCR line-split differences
+            // between chunks), speak the held text directly so it is never dropped.
+            heldLine?.let { held ->
+                val alreadyMerged = allLines.any {
+                    it.startsWith(held, ignoreCase = true) || it.contains(held, ignoreCase = true)
+                }
+                if (!alreadyMerged) {
+                    allLines.add(0, held)
+                }
+                heldLine = null
+            }
+
             // The bottom-most line of a chunk may be a sentence sliced in half by the
             // chunk/screen edge. If it doesn't end with terminal punctuation and this
             // isn't the last chunk of the page, hold it back instead of speaking it —
             // the next (overlapping) chunk will bring in the rest of the sentence so
             // it gets read ONCE, in full, instead of being split into two separate
             // readings (a broken half now + the same sentence again later).
-            //
-            // IMPORTANT: only hold back for a SINGLE chunk. OCR text can vary slightly
-            // between chunks (spacing, capitalization, minor misreads), so comparing
-            // exact strings to detect "already held" is unreliable and can silently
-            // drop a sentence forever (it gets held, replaced by a slightly different
-            // held value next chunk, and the original is never spoken). Capping the
-            // hold at one chunk guarantees every line is eventually spoken.
             val isFinalChunk = chunkEnd >= pageH
-            if (allLines.isNotEmpty() && heldLine == null) {
+            if (allLines.isNotEmpty()) {
                 val last = allLines.last()
                 val looksComplete = last.isEmpty() || last.last() in ".!?\u2026\"'\u201d\u2019)]"
                 if (!looksComplete && !isFinalChunk) {
                     allLines.removeAt(allLines.lastIndex)
                     heldLine = last
-                } 
-            } else {
-                // Either nothing to hold, or we already held one chunk's worth —
-                // force everything through this round so nothing is lost.
-                heldLine = null
+                }
             }
 
             // Only speak lines not yet spoken on this page (handles overlap re-detection)
@@ -526,11 +537,12 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (newLines.isNotEmpty()) {
                 tvStatus.text = "Reading..."
                 speakAndWait(normalizeForTts(newLines.joinToString(" ")))
-                if (!isReading) return false
+                if (!isReading) { scrollJob?.cancel(); return false }
             }
 
-            // Mark this chunk's lines as spoken (including overlap lines), EXCEPT the
-            // held-back cut-off line — it must stay eligible to be read once complete.
+            // Mark this chunk's lines as spoken (including overlap lines). Any
+            // cut-off line has already been captured into heldLine above (to be
+            // resumed next chunk), so it's safe to mark everything else here.
             spokenLines.addAll(allLines)
             // No new text OR all lines already read — continue scrolling
 
@@ -539,8 +551,14 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 isReading = false
                 btnReadPause.text = "\u25B6"
                 readingHighlight.visibility = View.GONE
+                scrollJob?.cancel()
                 return false
             }
+
+            // Make sure the scroll animation actually finished before moving on —
+            // it was fired in the background so speech could start instantly, but
+            // the next chunk's target must be computed against a fully-settled view.
+            scrollJob?.join()
 
             // Always advance — full auto scroll never halts on empty panels
             chunkOffset += step
