@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <ScrollView
+        android:id="@+id/manhwaScrollView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scrollbars="vertical"
+        android:fillViewport="false">
+
+        <ImageView
+            android:id="@+id/manhwaImageView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:adjustViewBounds="true"
+            android:scaleType="fitWidth"
+            android:contentDescription="Manhwa page" />
+    </ScrollView>
+
+    <!-- Floating side controls -->
+    <LinearLayout
+        android:layout_width="64dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_vertical|end"
+        android:layout_marginEnd="4dp"
+        android:orientation="vertical"
+        android:background="#DD1B1F3B"
+        android:paddingTop="10dp"
+        android:paddingBottom="10dp"
+        android:paddingStart="4dp"
+        android:paddingEnd="4dp"
+        android:gravity="center_horizontal"
+        android:elevation="10dp">
+
+        <TextView
+            android:id="@+id/tvManhwaStatus"
+            android:layout_width="56dp"
+            android:layout_height="wrap_content"
+            android:text="Loading..."
+            android:textColor="#CCFFFFFF"
+            android:textSize="7sp"
+            android:gravity="center"
+            android:maxLines="3"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnReadPause"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:text="▶"
+            android:textSize="22sp"
+            android:backgroundTint="@color/colorSecondary"
+            android:textColor="@color/colorPrimary"
+            android:padding="0dp"
+            android:layout_marginBottom="4dp" />
+
+        <Button
+            android:id="@+id/btnManhwaStop"
+            android:layout_width="56dp"
+            android:layout_height="44dp"
+            android:text="⏹"
+            android:textSize="18sp"
+            android:backgroundTint="@color/colorError"
+            android:textColor="#FFFFFF"
+            android:padding="0dp"
+            android:layout_marginBottom="4dp" />
+
+        <ToggleButton
+            android:id="@+id/btnAutoScroll"
+            android:layout_width="56dp"
+            android:layout_height="44dp"
+            android:textOn="↕ ON"
+            android:textOff="↕ OFF"
+            android:textSize="9sp"
+            android:checked="true"
+            android:backgroundTint="@color/colorManhwaAccent"
+            android:textColor="@color/colorPrimary"
+            android:padding="0dp" />
+    </LinearLayout>
+
+</FrameLayout>
