@@ -468,7 +468,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val bmpTop = ((chunkOffset.toFloat() / pageH) * bmpH).toInt().let { if (it < 0) 0 else if (it >= bmpH) bmpH - 1 else it }
             val bmpEnd = ((chunkEnd.toFloat() / pageH) * bmpH).toInt().let { if (it <= bmpTop) bmpTop + 1 else if (it > bmpH) bmpH else it }
             val sliceH = bmpEnd - bmpTop
-            val slice = Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
 
             tvStatus.text = "Scanning..."
             // Fire the scroll animation in the background instead of waiting for it
@@ -482,6 +481,12 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val scrollJob: Job? = if (scrollView.scrollY != scrollTarget) {
                 lifecycleScope.launch { animatedScrollTo(scrollTarget, scrollDuration) }
             } else null
+            // Create the bitmap slice on IO — Bitmap.createBitmap() can block the
+            // main thread for tens of milliseconds on large pages, causing visible
+            // frame drops while the scroll animation is running at the same time.
+            val slice = withContext(Dispatchers.IO) {
+                Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
+            }
             val text = recognizeText(slice)
             slice.recycle()
 
@@ -607,27 +612,21 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (startY == targetY) { cont.resume(Unit); return@suspendCoroutine }
             val anim = ValueAnimator.ofInt(startY, targetY).apply {
                 duration = durationMs
-                // DecelerateInterpolator feels more natural than Linear
                 interpolator = android.view.animation.DecelerateInterpolator()
                 addUpdateListener { anim -> scrollView.scrollTo(0, anim.animatedValue as Int) }
                 addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(a: Animator) {
-                        // Release GPU cache after scroll completes
-                        pagesContainer.setLayerType(View.LAYER_TYPE_NONE, null)
-                        cont.resume(Unit)
-                    }
-                    override fun onAnimationCancel(a: Animator) {
-                        pagesContainer.setLayerType(View.LAYER_TYPE_NONE, null)
-                        cont.resume(Unit)
-                    }
+                    override fun onAnimationEnd(a: Animator)    { cont.resume(Unit) }
+                    override fun onAnimationCancel(a: Animator) { cont.resume(Unit) }
                 })
             }
-            scrollView.post {
-                // GPU-cache the content during scroll: each frame is a texture
-                // composite instead of a full software redraw — eliminates lag
-                pagesContainer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
-                anim.start()
-            }
+            // NOTE: do NOT set LAYER_TYPE_HARDWARE on pagesContainer — it forces the
+            // entire container (all pages stacked) to be rasterised into a single GPU
+            // texture on every scroll frame. For a 10-page strip that texture can be
+            // hundreds of MB, causing exactly the "10 fps" stutter the user reported.
+            // The Activity is already hardware-accelerated (manifest flag), so Android's
+            // RenderThread already composites each ImageView tile efficiently without
+            // any explicit layer hint. Just start the animator directly.
+            scrollView.post { anim.start() }
         }
 
     // A recognized line of text plus how tilted its source block is.
@@ -735,13 +734,17 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun isNoiseLine(line: String): Boolean {
         val t = line.trim()
-        if (t.length in 1..5) {
-            // Exception: short but expressive — genuine reaction words like "huh?",
-            // "oh!", "no!", "wow?" that contain real letters AND end with ?/!
-            // These are real dialogue, not OCR artifacts or stray labels.
+        if (t.length in 1..6) {
             val letterCount = t.count { it.isLetter() }
+            // Pure-letter short words (MOVE, YES, NO, RUN, GO, STOP, WAIT, etc.) are
+            // real dialogue — a speech bubble's first word often lands on its own OCR
+            // line and must not be silently dropped just because it's short.
+            if (letterCount >= 2 && t.all { it.isLetter() }) return false
+            // Expressive reactions ending with ? or ! (huh?, oh!, huh!, no!, wow?)
+            // are real dialogue even when short.
             val isExpressive = t.last() == '?' || t.last() == '!'
-            if (letterCount >= 2 && isExpressive) return false   // keep "huh?", "no!", etc.
+            if (letterCount >= 2 && isExpressive) return false
+            // Everything else at this length is an OCR artifact / stray label.
             return true
         }
         if (noisePunctOnly.matches(t)) return true        // ..., !!!, ♡, ~, —
