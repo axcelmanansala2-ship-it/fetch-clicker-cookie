@@ -68,6 +68,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private var currentPageIndex = 0
     private var currentChunkOffset = 0
+    // Stores NORMALISED keys (see normalizeForDedup) so that minor OCR variations
+    // of the same visual text — different whitespace, stray punctuation, slight
+    // capitalisation differences between two scans of the same bubble — are still
+    // recognised as "already spoken" and never re-read.
     private val spokenLines = mutableSetOf<String>()
     // Bottom-most line of the previous chunk that looked cut off mid-sentence
     // (no ending punctuation). Held back instead of spoken so the next,
@@ -563,8 +567,12 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
-            // Only speak lines not yet spoken on this page (handles overlap re-detection)
-            val newLines = allLines.filter { line -> line !in spokenLines }
+            // Only speak lines not yet spoken on this page (handles overlap re-detection).
+            // Use normalised keys so minor OCR variations of the same bubble text
+            // (extra space, stray punctuation, slight case difference between two
+            // scans of the same visible region) are still recognised as duplicates
+            // and never re-read.
+            val newLines = allLines.filter { line -> normalizeForDedup(line) !in spokenLines }
 
             if (newLines.isNotEmpty()) {
                 tvStatus.text = "Reading..."
@@ -572,10 +580,9 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 if (!isReading) { scrollJob?.cancel(); return false }
             }
 
-            // Mark this chunk's lines as spoken (including overlap lines). Any
-            // cut-off line has already been captured into heldLine above (to be
-            // resumed next chunk), so it's safe to mark everything else here.
-            spokenLines.addAll(allLines)
+            // Mark this chunk's lines as spoken using normalised keys so that the
+            // next overlapping chunk's slightly-different OCR result still matches.
+            spokenLines.addAll(allLines.map { normalizeForDedup(it) })
             // No new text OR all lines already read — continue scrolling
 
             if (!autoScrollEnabled) {
@@ -782,6 +789,19 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (wordPart.isNotEmpty() && wordPart.all { it.isLetter() || it.isWhitespace() }) return false
         return true
     }
+
+    // Normalises a spoken line into a deduplication key so that minor OCR
+    // variations of the same visual text are treated as identical:
+    //   • lowercase        — "STRONG!" == "strong!"
+    //   • collapse spaces  — "BECOME  STRONG" == "BECOME STRONG"
+    //   • strip punctuation — "STRONG!" == "STRONG" == "STRONG !"
+    // Stripping punctuation is intentionally aggressive here: the goal is only
+    // dedup (have-we-read-this-bubble-before?), not TTS accuracy.
+    private fun normalizeForDedup(text: String): String =
+        text.lowercase()
+            .replace(Regex("[^a-z0-9\\s]"), "")   // remove all punctuation/symbols
+            .replace(Regex("\\s+"), " ")            // collapse whitespace
+            .trim()
 
     // Stammer/stutter dialogue like "W-What", "I-I", "S-Stop" reads badly if the
     // TTS spells out the lone leading letter(s) as an abbreviation (e.g. "double
