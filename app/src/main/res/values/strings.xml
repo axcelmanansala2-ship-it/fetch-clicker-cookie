@@ -52,4 +52,10 @@
     <string name="sso_filled">SSO key filled ✓</string>
     <string name="btn_get_sso">Get from Cookies</string>
     <string name="btn_sso_key">🔑 SSO Key Watcher</string>
+
+    <!-- Aim Lock -->
+    <string name="btn_aim_lock">🎯 Aim Lock (Bullseye Tracker)</string>
+    <string name="msg_aim_lock_started">Aim Lock service started</string>
+    <string name="notif_aim_lock_title">Aim Lock Active</string>
+    <string name="notif_aim_lock_text">Detecting bullseye targets…</string>
 </resources>
