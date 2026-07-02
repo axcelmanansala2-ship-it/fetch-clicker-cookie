@@ -403,6 +403,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             val cleanText = text.trim()
             val isDuplicate = cleanText.isNotBlank() &&
+                lastSpokenText.isNotBlank() &&
                 (cleanText == lastSpokenText ||
                  lastSpokenText.contains(cleanText) ||
                  cleanText.contains(lastSpokenText))
