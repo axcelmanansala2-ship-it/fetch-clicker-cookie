@@ -150,10 +150,22 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tvPageCount.text = if (total > 0) "${index + 1}/${total}" else ""
     }
 
+    // Decodes the source image at a resolution close to the device's own screen
+    // width instead of a fixed inSampleSize=2. Long manhwa strips are often far
+    // wider/taller than any phone screen; decoding them at full (or half) size
+    // wastes memory and makes every scroll/slice/OCR pass on that bitmap slower.
+    // Matches the same target-width approach already used for PDF pages.
     private fun loadImagePage(uri: Uri): List<Bitmap> {
         return try {
+            val targetWidth = minOf(resources.displayMetrics.widthPixels, 720)
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
+            val srcWidth = boundsOpts.outWidth.coerceAtLeast(1)
+            var sampleSize = 1
+            while (srcWidth / (sampleSize * 2) >= targetWidth) sampleSize *= 2
+
             val stream = contentResolver.openInputStream(uri) ?: return emptyList()
-            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
             val bmp = BitmapFactory.decodeStream(stream, null, opts)
             stream.close()
             if (bmp != null) listOf(bmp) else emptyList()
@@ -434,35 +446,50 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         while (isReading && chunkOffset < pageH) {
             val chunkEnd = if (chunkOffset + screenH < pageH) chunkOffset + screenH else pageH
 
-            // Scroll so content becomes visible before it is read
+            // Scroll target + OCR slice bounds are both known up-front (they only
+            // depend on chunkOffset/chunkEnd, not on the scroll actually finishing),
+            // so run the scroll animation and OCR at the same time instead of one
+            // after another. Previously we waited for the full scroll to finish
+            // before even starting OCR, which is exactly the 1-3s "dead air" delay
+            // after each scroll — now OCR overlaps with the scroll and the wait is
+            // only whichever of the two takes longer.
             val scrollTarget = if (pageView.top + chunkOffset > 0) pageView.top + chunkOffset else 0
-            if (scrollView.scrollY != scrollTarget) {
-                animatedScrollTo(scrollTarget, scrollDuration)
-            }
 
-            if (!isReading) return false
-
-            // OCR the visible slice (with overlap already baked into chunkOffset math)
             val bmpH   = pageBmp.height
             val bmpTop = ((chunkOffset.toFloat() / pageH) * bmpH).toInt().let { if (it < 0) 0 else if (it >= bmpH) bmpH - 1 else it }
             val bmpEnd = ((chunkEnd.toFloat() / pageH) * bmpH).toInt().let { if (it <= bmpTop) bmpTop + 1 else if (it > bmpH) bmpH else it }
             val sliceH = bmpEnd - bmpTop
+            val slice = Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
 
             tvStatus.text = "Scanning..."
-            val slice = Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
-            val text  = withContext(Dispatchers.Default) { recognizeText(slice) }
+            val text = coroutineScope {
+                val ocrDeferred = async(Dispatchers.Default) { recognizeText(slice) }
+                if (scrollView.scrollY != scrollTarget) {
+                    animatedScrollTo(scrollTarget, scrollDuration)
+                }
+                ocrDeferred.await()
+            }
             slice.recycle()
 
             if (!isReading) return false
 
-            // Skip blank lines, known UI/SFX noise words, AND anything drawn at an
-            // angle (tilted/curved text) — real dialogue is flat inside a bubble,
-            // decorative reaction/SFX text almost never is, no matter its color,
-            // shape, or exact wording.
-            val allLines = text
-                .map { OcrLine(it.text.trim(), it.rotatedDeg) }
+            // Skip blank lines, known UI/SFX noise words, anything drawn at an angle
+            // (tilted/curved text), AND text that is noticeably smaller than the
+            // dialogue in this chunk. Real dialogue is drawn large enough to read
+            // comfortably; tiny background UI (phone-mockup nav bars, app labels,
+            // watermarks) or title text is much smaller by comparison. The size
+            // threshold is computed per-chunk from the median line height instead
+            // of a fixed pixel value, so it adapts to each manhwa's own art/font
+            // scale automatically.
+            val candidates = text
+                .map { OcrLine(it.text.trim(), it.rotatedDeg, it.heightPx) }
                 .filter { it.text.isNotBlank() }
+            val knownHeights = candidates.map { it.heightPx }.filter { it > 0 }.sorted()
+            val minDialogueHeight =
+                if (knownHeights.isNotEmpty()) (knownHeights[knownHeights.size / 2] * 0.45f).toInt() else 0
+            val allLines = candidates
                 .filter { !isNoiseLine(it.text) && abs(it.rotatedDeg) < ROTATED_NOISE_DEG }
+                .filter { it.heightPx <= 0 || it.heightPx >= minDialogueHeight }
                 .map { it.text }
                 .toMutableList()
 
@@ -565,7 +592,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // specific word used. Using rotation as a signal lets us auto-ignore noise
     // we've never seen the exact wording of before, instead of relying only on
     // an ever-growing word list.
-    private data class OcrLine(val text: String, val rotatedDeg: Float)
+    private data class OcrLine(val text: String, val rotatedDeg: Float, val heightPx: Int)
 
     // Sort text blocks top-to-bottom then left-to-right so multi-column panels
     // (speech bubbles side-by-side) are read in the correct visual sequence.
@@ -580,7 +607,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 val lines = mutableListOf<OcrLine>()
                 for (block in sorted) {
                     val angle = blockRotationDegrees(block.cornerPoints)
-                    block.text.split("\n").forEach { lines.add(OcrLine(it, angle)) }
+                    val subLines = block.text.split("\n")
+                    val nonBlankCount = subLines.count { it.isNotBlank() }.coerceAtLeast(1)
+                    val perLineHeight = (block.boundingBox?.height() ?: 0) / nonBlankCount
+                    subLines.forEach { lines.add(OcrLine(it, angle, perLineHeight)) }
                 }
                 cont.resume(lines)
             }
@@ -672,6 +702,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (isSymbolGarble(t)) return true                // &아#@!&아#! — censor-style cursing/shouting
         // Pure numeric / timestamp / percentage (page numbers, status bar, battery)
         if (t.replace(Regex("[0-9:./%\\-\\s]"), "").isEmpty() && t.length <= 12) return true
+        // Clock time with AM/PM (phone-mockup status bars), e.g. "7:00 PM"
+        if (Regex("""^\d{1,2}:\d{2}\s*(AM|PM)$""", RegexOption.IGNORE_CASE).matches(t)) return true
         return false
     }
 
