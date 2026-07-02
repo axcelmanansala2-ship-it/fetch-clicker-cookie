@@ -498,7 +498,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 .filter { block -> block.blockBox == null || isInsideBubble(slice, block.blockBox) }
                 .flatMap { it.lines }
                 .filter { it.isNotBlank() }
-                .filter { line -> !isSymbolGarble(line) }   // skip unreadable censor-scream
                 .toMutableList()
 
             slice.recycle()   // safe to recycle now — pixel data consumed above
