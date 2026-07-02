@@ -62,7 +62,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private var currentPageIndex = 0
     private var currentChunkOffset = 0
-    private var lastSpokenText = ""
+    private val spokenLines = mutableSetOf<String>()
 
     private var ttsSpeed = 1.0f
     private var scrollDuration = 1500L
@@ -284,7 +284,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         btnReadPause.text = "\u25B6"
         currentPageIndex = 0
         currentChunkOffset = 0
-        lastSpokenText = ""
+        spokenLines.clear()
         tvStatus.text = "Stopped"
         updatePageCounter(0)
         readingHighlight.visibility = View.GONE
@@ -335,7 +335,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             isReading = false
             currentPageIndex = 0
             currentChunkOffset = 0
-            lastSpokenText = ""
+            spokenLines.clear()
             btnReadPause.text = "\u25B6"
             readingHighlight.visibility = View.GONE
             clearPageHighlight()
@@ -374,6 +374,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         highlightPage(pageIdx)
         updatePageCounter(pageIdx)
+        spokenLines.clear()  // fresh per page — prevents re-reading overlap regions
 
         var chunkOffset = currentChunkOffset
 
@@ -401,20 +402,23 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             if (!isReading) return false
 
-            val cleanText = text.trim()
-            val isDuplicate = cleanText.isNotBlank() &&
-                lastSpokenText.isNotBlank() &&
-                (cleanText == lastSpokenText ||
-                 lastSpokenText.contains(cleanText) ||
-                 cleanText.contains(lastSpokenText))
+            // Split OCR result into individual lines
+            val allLines = text.split("\n")
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
 
-            if (cleanText.isNotBlank() && !isDuplicate) {
+            // Only speak lines not yet spoken on this page (handles overlap re-detection)
+            val newLines = allLines.filter { line -> line !in spokenLines }
+
+            if (newLines.isNotEmpty()) {
                 tvStatus.text = "Reading..."
-                lastSpokenText = cleanText
-                speakAndWait(normalizeForTts(cleanText))
+                speakAndWait(normalizeForTts(newLines.joinToString(" ")))
                 if (!isReading) return false
             }
-            // No text OR duplicate (overlap re-read) — do NOT stop, just continue
+
+            // Mark ALL lines from this chunk as spoken (including overlap lines)
+            spokenLines.addAll(allLines)
+            // No new text OR all lines already read — continue scrolling
 
             if (!autoScrollEnabled) {
                 tvStatus.text = "Scroll & tap \u25B6"
