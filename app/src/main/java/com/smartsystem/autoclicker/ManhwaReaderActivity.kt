@@ -411,7 +411,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (cleanText.isNotBlank() && !isDuplicate) {
                 tvStatus.text = "Reading..."
                 lastSpokenText = cleanText
-                speakAndWait(cleanText)
+                speakAndWait(normalizeForTts(cleanText))
                 if (!isReading) return false
             }
             // No text OR duplicate (overlap re-read) — do NOT stop, just continue
@@ -459,6 +459,14 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             .addOnSuccessListener { result -> cont.resume(result.text) }
             .addOnFailureListener { cont.resume("") }
     }
+
+    // Convert ALL-CAPS words (2+ letters) to Title Case so TTS reads them as
+    // natural words instead of spelling them out letter by letter.
+    // e.g. AXCEL → Axcel, DOKJA → Dokja, BUT single-letter 'I' stays as-is.
+    private fun normalizeForTts(text: String): String =
+        text.replace(Regex("""\b([A-Z]{2,})\b""")) { m ->
+            m.value.lowercase().replaceFirstChar { it.uppercase() }
+        }
 
     private suspend fun speakAndWait(text: String): Unit = suspendCoroutine { cont ->
         val uid = "chunk_${System.currentTimeMillis()}"
