@@ -16,6 +16,4 @@
     <color name="colorOverlayBg">#CC1B1F3B</color>
     <!-- Account checker overlay uses orange to distinguish from auto-clicker -->
     <color name="colorCheckerStart">#FF9800</color>
-    <!-- Aim Lock overlay uses red to signal targeting mode -->
-    <color name="colorAimLockStart">#F44336</color>
 </resources>
