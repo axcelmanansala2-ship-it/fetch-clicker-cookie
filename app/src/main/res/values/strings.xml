@@ -52,4 +52,10 @@
     <string name="sso_filled">SSO key filled ✓</string>
     <string name="btn_get_sso">Get from Cookies</string>
     <string name="btn_sso_key">🔑 SSO Key Watcher</string>
+
+    <!-- Manhwa Reader -->
+    <string name="btn_manhwa_reader">📖 Open Manhwa Reader</string>
+    <string name="manhwa_no_text">No text detected — scroll manually</string>
+    <string name="manhwa_reading">Reading panel…</string>
+    <string name="manhwa_done">Done reading!</string>
 </resources>
