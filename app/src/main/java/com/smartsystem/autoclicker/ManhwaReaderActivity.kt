@@ -508,8 +508,11 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 .map { OcrLine(it.text.trim(), it.rotatedDeg, it.heightPx) }
                 .filter { it.text.isNotBlank() }
             val knownHeights = candidates.map { it.heightPx }.filter { it > 0 }.sorted()
+            // Threshold lowered from 0.45→0.25 so narration boxes (smaller text than
+            // speech-bubble dialogue) are not silently filtered out. We still catch
+            // truly tiny watermarks / status-bar OCR artefacts (< 25 % of median).
             val minDialogueHeight =
-                if (knownHeights.isNotEmpty()) (knownHeights[knownHeights.size / 2] * 0.45f).toInt() else 0
+                if (knownHeights.isNotEmpty()) (knownHeights[knownHeights.size / 2] * 0.25f).toInt() else 0
             val allLines = candidates
                 .filter { !isNoiseLine(it.text) && abs(it.rotatedDeg) < ROTATED_NOISE_DEG }
                 .filter { it.heightPx <= 0 || it.heightPx >= minDialogueHeight }
@@ -541,6 +544,11 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
                 if (!alreadyMerged) {
                     allLines.add(0, held)
+                    // The held line was removed from allLines before spokenLines was
+                    // updated, so it should never already be in spokenLines — but the
+                    // overlap region can re-detect it and add it there before this
+                    // chunk runs. Evict it now so the re-inserted line is always spoken.
+                    spokenLines.remove(normalizeForDedup(held))
                     resumedRaw = true
                 } else {
                     wasHeldAndMerged = true
@@ -567,6 +575,15 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 }
             }
 
+            // Wait for the scroll animation to reach this chunk's position BEFORE
+            // speaking — OCR ran in parallel (bitmap slice, no scroll needed), but
+            // the user should see the text on screen before hearing it.
+            // Previously scrollJob?.join() was placed AFTER speakAndWait, which meant
+            // TTS started while the screen was still scrolling into position, making
+            // it look like the reader was speaking content ahead of the visual scroll.
+            scrollJob?.join()
+            if (!isReading) return false
+
             // Only speak lines not yet spoken on this page (handles overlap re-detection).
             // Use normalised keys so minor OCR variations of the same bubble text
             // (extra space, stray punctuation, slight case difference between two
@@ -577,7 +594,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (newLines.isNotEmpty()) {
                 tvStatus.text = "Reading..."
                 speakAndWait(normalizeForTts(newLines.joinToString(" ")))
-                if (!isReading) { scrollJob?.cancel(); return false }
+                if (!isReading) return false
             }
 
             // Mark this chunk's lines as spoken using normalised keys so that the
@@ -590,14 +607,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 isReading = false
                 btnReadPause.text = "\u25B6"
                 readingHighlight.visibility = View.GONE
-                scrollJob?.cancel()
                 return false
             }
-
-            // Make sure the scroll animation actually finished before moving on —
-            // it was fired in the background so speech could start instantly, but
-            // the next chunk's target must be computed against a fully-settled view.
-            scrollJob?.join()
 
             // Always advance — full auto scroll never halts on empty panels
             chunkOffset += step
@@ -819,16 +830,35 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // Single uppercase letters (pronoun 'I') are left unchanged.
     private fun normalizeForTts(text: String): String =
         text.replace(stutterPrefix, "")
+            // Expand common abbreviations that TTS reads as letter-sequences.
+            // "etc." / "etc" → "etcetera" (TTS reads "etc" as "ee-tee-see" otherwise).
+            .replace(Regex("""\betc\.""", RegexOption.IGNORE_CASE), "etcetera")
+            .replace(Regex("""\betc\b""", RegexOption.IGNORE_CASE), "etcetera")
             .replace(Regex("[A-Z]{2,}")) { m -> m.value.lowercase() }
 
-    private suspend fun speakAndWait(text: String): Unit = suspendCoroutine { cont ->
-        val uid = "chunk_${System.currentTimeMillis()}"
-        tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-            override fun onStart(id: String?) {}
-            override fun onDone(id: String?)  { if (id == uid) cont.resume(Unit) }
-            override fun onError(id: String?) { if (id == uid) cont.resume(Unit) }
-        })
-        tts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, uid)
+    private suspend fun speakAndWait(text: String) {
+        // Guard: if TTS is gone or not yet ready, skip silently rather than hanging.
+        if (tts == null || !ttsReady || text.isBlank()) return
+        // 60-second hard timeout — if the TTS engine never fires onDone/onError
+        // (e.g. engine crash, null utterance ID, QUEUE_FLUSH race), the coroutine
+        // would block forever without this. The timeout stops the stall and lets
+        // the reading loop advance to the next chunk automatically.
+        withTimeoutOrNull(60_000L) {
+            suspendCancellableCoroutine<Unit> { cont ->
+                val uid = "chunk_${System.currentTimeMillis()}"
+                tts!!.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {}
+                    override fun onDone(id: String?)  { if (id == uid) cont.resume(Unit) }
+                    override fun onError(id: String?) { if (id == uid) cont.resume(Unit) }
+                })
+                val result = tts!!.speak(text, TextToSpeech.QUEUE_FLUSH, null, uid)
+                // speak() returning ERROR means the callback will never fire — resume now.
+                if (result == TextToSpeech.ERROR) cont.resume(Unit)
+                // If the coroutine is cancelled (user hits Stop/Pause), stop TTS immediately
+                // so audio cuts off at once instead of finishing the current utterance.
+                cont.invokeOnCancellation { tts?.stop() }
+            }
+        } ?: tts?.stop()  // timeout hit — kill audio and continue
     }
 
     override fun onInit(status: Int) {
