@@ -10,6 +10,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Point
+import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -475,50 +476,32 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val sliceH = bmpEnd - bmpTop
 
             tvStatus.text = "Scanning..."
-            // Fire the scroll animation in the background instead of waiting for it
-            // to finish before reading — previously this call blocked here for the
-            // full scrollDuration (e.g. 1.5s) even when OCR/text was ready almost
-            // instantly, which is exactly the "delay before it reads" lag. Now
-            // speech starts the moment OCR completes, while the scroll keeps
-            // animating underneath it; we only wait for the scroll to truly finish
-            // right before computing the NEXT chunk's target, so animations never
-            // overlap/collide with each other.
             val scrollJob: Job? = if (scrollView.scrollY != scrollTarget) {
                 lifecycleScope.launch { animatedScrollTo(scrollTarget, scrollDuration) }
             } else null
-            // Create the bitmap slice on IO — Bitmap.createBitmap() can block the
-            // main thread for tens of milliseconds on large pages, causing visible
-            // frame drops while the scroll animation is running at the same time.
+            // Create bitmap slice on IO thread — keeps main thread free for animations.
             val slice = withContext(Dispatchers.IO) {
                 Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
             }
-            val text = recognizeText(slice)
-            slice.recycle()
+            val blocks = recognizeText(slice)
 
-            if (!isReading) { scrollJob?.cancel(); return false }
+            if (!isReading) { slice.recycle(); scrollJob?.cancel(); return false }
 
-            // Skip blank lines, known UI/SFX noise words, anything drawn at an angle
-            // (tilted/curved text), AND text that is noticeably smaller than the
-            // dialogue in this chunk. Real dialogue is drawn large enough to read
-            // comfortably; tiny background UI (phone-mockup nav bars, app labels,
-            // watermarks) or title text is much smaller by comparison. The size
-            // threshold is computed per-chunk from the median line height instead
-            // of a fixed pixel value, so it adapts to each manhwa's own art/font
-            // scale automatically.
-            val candidates = text
-                .map { OcrLine(it.text.trim(), it.rotatedDeg, it.heightPx) }
-                .filter { it.text.isNotBlank() }
-            val knownHeights = candidates.map { it.heightPx }.filter { it > 0 }.sorted()
-            // Threshold lowered from 0.45→0.25 so narration boxes (smaller text than
-            // speech-bubble dialogue) are not silently filtered out. We still catch
-            // truly tiny watermarks / status-bar OCR artefacts (< 25 % of median).
-            val minDialogueHeight =
-                if (knownHeights.isNotEmpty()) (knownHeights[knownHeights.size / 2] * 0.25f).toInt() else 0
-            val allLines = candidates
-                .filter { !isNoiseLine(it.text) && abs(it.rotatedDeg) < ROTATED_NOISE_DEG }
-                .filter { it.heightPx <= 0 || it.heightPx >= minDialogueHeight }
-                .map { it.text }
+            // ── Bubble-detection filter ──────────────────────────────────────────────
+            // Instead of pattern-matching on text content, sample the pixel background
+            // BEHIND each OCR text block. Speech bubbles, narration boxes, and phone
+            // screens all have a uniform flat background colour (white, black, dark
+            // red…). Artwork / SFX text floats directly on the illustrated background,
+            // which is highly varied in colour. Low background-variance → inside a
+            // bubble → read it. High variance → on artwork → skip it. No word-lists.
+            val allLines = blocks
+                .filter { block -> block.blockBox == null || isInsideBubble(slice, block.blockBox) }
+                .flatMap { it.lines }
+                .filter { it.isNotBlank() }
+                .filter { line -> !isSymbolGarble(line) }   // skip unreadable censor-scream
                 .toMutableList()
+
+            slice.recycle()   // safe to recycle now — pixel data consumed above
 
             // A phrase held back from the PREVIOUS chunk (cut off by the screen edge)
             // must be brought back in now, or it is silently lost forever. The
@@ -648,138 +631,80 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             scrollView.post { anim.start() }
         }
 
-    // A recognized line of text plus how tilted its source block is.
-    // Real dialogue sits flat inside a speech bubble; decorative SFX / reaction
-    // labels (STARE, MURMUR, sound effects, etc.) are almost always drawn at an
-    // angle, curved, or stylized — regardless of their color, box shape, or the
-    // specific word used. Using rotation as a signal lets us auto-ignore noise
-    // we've never seen the exact wording of before, instead of relying only on
-    // an ever-growing word list.
-    private data class OcrLine(val text: String, val rotatedDeg: Float, val heightPx: Int)
+    // Carries all text lines from one ML Kit TextBlock together with the block's
+    // bounding box — used for background-pixel sampling in isInsideBubble().
+    private data class TextBlockInfo(
+        val lines: List<String>,
+        val blockBox: Rect?
+    )
 
-    // Sort text blocks top-to-bottom then left-to-right so multi-column panels
-    // (speech bubbles side-by-side) are read in the correct visual sequence.
-    private suspend fun recognizeText(bmp: Bitmap): List<OcrLine> = suspendCoroutine { cont ->
+    // OCR the bitmap and return text blocks sorted top-to-bottom, left-to-right
+    // so multi-column panels (bubbles side-by-side) are processed in reading order.
+    private suspend fun recognizeText(bmp: Bitmap): List<TextBlockInfo> = suspendCoroutine { cont ->
         recognizer.process(InputImage.fromBitmap(bmp, 0))
             .addOnSuccessListener { result ->
-                val sorted = result.textBlocks
-                    .sortedWith(compareBy(
-                        { it.boundingBox?.top  ?: 0 },
-                        { it.boundingBox?.left ?: 0 }
-                    ))
-                val lines = mutableListOf<OcrLine>()
-                for (block in sorted) {
-                    val angle = blockRotationDegrees(block.cornerPoints)
-                    val subLines = block.text.split("\n")
-                    val nonBlankCount = subLines.count { it.isNotBlank() }.coerceAtLeast(1)
-                    val perLineHeight = (block.boundingBox?.height() ?: 0) / nonBlankCount
-                    subLines.forEach { lines.add(OcrLine(it, angle, perLineHeight)) }
-                }
-                cont.resume(lines)
+                val sorted = result.textBlocks.sortedWith(compareBy(
+                    { it.boundingBox?.top  ?: 0 },
+                    { it.boundingBox?.left ?: 0 }
+                ))
+                cont.resume(sorted.map { block ->
+                    TextBlockInfo(
+                        lines = block.text.split("\n").map { it.trim() }.filter { it.isNotBlank() },
+                        blockBox = block.boundingBox
+                    )
+                })
             }
             .addOnFailureListener { cont.resume(emptyList()) }
     }
 
-    // Angle (in degrees) of the top edge of a text block relative to horizontal.
-    // 0° = perfectly flat (normal dialogue). Large values = tilted/curved/rotated
-    // decorative text (typical of onomatopoeia and reaction labels).
-    private fun blockRotationDegrees(corners: Array<Point>?): Float {
-        if (corners == null || corners.size < 2) return 0f
-        val dx = (corners[1].x - corners[0].x).toFloat()
-        val dy = (corners[1].y - corners[0].y).toFloat()
-        if (dx == 0f && dy == 0f) return 0f
-        return Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
-    }
-
-    // Any recognized text block tilted more than this many degrees from
-    // horizontal is treated as decorative SFX/reaction text, not dialogue.
-    private val ROTATED_NOISE_DEG = 15f
-
-    // ── Noise filter: lines matching any of these patterns are silently skipped ──
+    // ── Bubble detection ─────────────────────────────────────────────────────────
     //
-    // 1. Gesture / UI interaction overlays + social / nav buttons
-    private val noiseUiAction = Regex(
-        """^(SWIPE|TAP|SCROLL|CLICK|HOLD|DRAG|PINCH|NEXT|PREV|PREVIOUS|HOME|BACK|FORWARD|RETRY|REFRESH|LOAD|LOADING|FOLLOW|LIKE|SHARE|SUBSCRIBE|REPORT|BOOKMARK|SAVE)(\s+(SWIPE|TAP|SCROLL|NEXT|PREV|PREVIOUS|HOME|BACK|FOLLOW|LIKE|SHARE))*$""",
-        setOf(RegexOption.IGNORE_CASE)
-    )
-    // 2. App / website metadata embedded in manhwa panels
-    //    e.g. "READ EPISODE 3125 COMMENTS: 1 VIEWS: 1"
-    //         "NEXT EPISODE"  "© 2024 WEBTOON"
-    private val noiseUiMeta = Regex(
-        """(READ\s+EPISODE|NEXT\s+EPISODE|NEXT\s+CHAPTER|PREV(IOUS)?\s+(EPISODE|CHAPTER)|COMMENTS?\s*:|\bVIEWS?\s*:|\bLIKES?\s*:|\bSUBSCRIBERS?\s*:|EPISODE\s+\d|\bCHAPTER\s+\d|\bEP\.\s*\d|ALL\s+RIGHTS\s+RESERVED|COPYRIGHT|\bWEBTOON\b|\bTAPAS\b)""",
-        setOf(RegexOption.IGNORE_CASE)
-    )
-    // 3. Pure SFX / onomatopoeia standing alone (not embedded in dialogue)
-    private val noiseSfx = Regex(
-        """^(BOOM|BANG|CRASH|CRACK|THUD|SLAM|SMASH|WHOOSH|SWOOSH|WHACK|THWACK|CLANG|CLATTER|POP|SNAP|WHAM|POW|KABOOM|POOF|PUFF|ZAP|ZING|FWOOSH|FWOOM|BWOOM|CLUNK|BONK|BOING|CREAK|RATTLE|RUMBLE|ROAR|GROWL|HISS|SQUEAK|THUMP|GASP|SNIFF|GULP|PANT|WHEEZE|MURMUR|SHUDDER|RUSTLE|GLEAM|SPARKLE|FLASH|TREMBLE|FLICKER|SHING|SLASH|FWAP|THWAP|STOMP|SKID|VROOM|WHOMP|CRUNCH|MUNCH|DING|DONG|BEEP|BUZZ|RING|CHIME|KNOCK|TICK|TOCK|TICKTOCK|SPLASH|SPLOSH|DRIP|PLOP|SIZZLE|CRACKLE|SLURP|CHOMP|GULP|SLURRRP|SCREECH|SHRIEK|HOWL|CHIRP|TWEET|MEOW|WOOF|NEIGH|OINK|MOO|BAABAA|CLOP|JINGLE|CLINK|TING|WHIR|HUM|BUZZ|SPARK|CRACKLE|FIZZ|GURGLE|SLOSH)(\s+(BOOM|BANG|CRASH|THUD|POP|SNAP|ZAP|POOF|WHAM|POW|GASP|SOB|HA|HEH|HUE))*$""",
-        setOf(RegexOption.IGNORE_CASE)
-    )
-    // 4. Repetitive short syllables — fixed to {1,} so "HA HA" (2x) is also caught
-    //    HA HA, HA HA HA, SOB SOB, HEH HEH HEH, etc.
-    private val noiseRepeat = Regex(
-        """^([A-Z]{1,5})(\s+\1){1,}$""",
-        setOf(RegexOption.IGNORE_CASE)
-    )
-    // 5. Text wrapped in decoration symbols: *poof*, *laughs*, [smile], [THE END]
-    private val noiseSymbol = Regex(
-        """^\*[^*]{1,40}\*$|^\[[^\]]{1,40}\]$"""
-    )
-    // 6. Lines with ONLY punctuation / symbols — no letters or digits at all
-    //    e.g. "...", "!!!", "???", "!?", "♡", "~", "—"
-    private val noisePunctOnly = Regex(
-        """^[^a-zA-Z0-9]+$"""
-    )
-    // 7. Single-word emotion / expression labels placed beside characters
-    //    e.g. "SMILE", "BLUSH", "GLARE" — visual annotations, not dialogue
-    private val noiseEmotion = Regex(
-        """^(SMILE|SMILING|SMIRK|SMIRKING|GRIN|GRINNING|LAUGH|LAUGHING|CHUCKLE|CHUCKLING|CRY|CRYING|WEEP|WEEPING|BLUSH|BLUSHING|WINK|WINKING|GLARE|GLARING|STARE|STARING|POUT|POUTING|YAWN|YAWNING|FREEZE|FROZEN|SHOCK|SHOCKED|SURPRISED|TREMBLING|SWEATING|SCREAMING|SHRUG|SHRUGGING|NOD|NODDING|PANIC|PANICKING|RAGE|SHIVER|SHIVERING|FIDGET|SULK|SULKING|SQUINT|SQUINTING|FROWN|FROWNING|SNIFFLE|SNIFFLING|SNEER|SNEERING|SCOFF|SCOFFING|TWITCH|TWITCHING|TENSE|TWITCHY|NERVOUS|EMBARRASSED|FLINCH|FLINCHING|WINCE|WINCING|STARTLE|STARTLED|DAZE|DAZED|PHEW|SIGH|SIGHING|GULP|GULPING)$""",
-        setOf(RegexOption.IGNORE_CASE)
-    )
-    // 8. Laughter/reaction without spaces: HAHA, HAHAHA, HEHEHE, KEKEKE, PFFT, LOL…
-    //    Fixed to {2,} repeats so 3+ syllables (HAHAHA, HEHEHEHE, KEKEKEKE, etc.)
-    //    are caught too, not just exactly two.
-    //    Optional trailing punctuation (.!?~…) is allowed.
-    //    e.g. "HAHA...", "HAHAHA", "KEKEKE", "PFFT", "LOL"
-    private val noiseLaugh = Regex(
-        """^(A*(?:HA+){2,}|(?:HE+){2,}|(?:HO+){2,}|(?:KE+){2,}|(?:FU+){2,}|KY+A*HA+|AHA+|PFFT+|LMAO|LOL+|MUHA+|BWAHA+|GYAHA+|NYAHA+)[!?.~\u2026]*$""",
-        setOf(RegexOption.IGNORE_CASE)
-    )
+    // Returns true when a text block sits inside a speech bubble, narration box,
+    // phone screen, or any uniform-background container — as opposed to text that
+    // floats directly on the illustrated artwork (SFX, watermarks, reaction labels).
+    //
+    // Works for ANY shape and colour:
+    //   ● White oval dialogue bubbles           ● Black rectangular narration boxes
+    //   ● Dark-red burst emphasis circles        ● White phone screens inside panels
+    //   ● Any other solid-background container
+    //
+    // Method: sample pixel colours along the expanded edges of the block bounding
+    // box and measure the VARIANCE of pixel brightness (HSV Value channel).
+    //   • Inside a bubble → pixels are all roughly the same flat colour → LOW variance
+    //   • On open artwork → pixels are part of the illustrated scene → HIGH variance
+    //
+    // No word-lists, no rotation checks, no height thresholds — just pixels.
+    private fun isInsideBubble(bmp: Bitmap, box: Rect): Boolean {
+        if (box.isEmpty) return true
 
-    /**
-     * Returns true if the line is visual/UI noise that should never be spoken.
-     * Covers: gesture/nav overlays, app metadata, pure SFX, repetitive syllables,
-     * symbol-wrapped text, pure punctuation, bare numeric/timestamp lines, and
-     * garbled "censor scream" text (mostly symbols, unreadable as words).
-     */
-    private fun isNoiseLine(line: String): Boolean {
-        val t = line.trim()
-        if (t.length in 1..6) {
-            val letterCount = t.count { it.isLetter() }
-            // Pure-letter short words (MOVE, YES, NO, RUN, GO, STOP, WAIT, etc.) are
-            // real dialogue — a speech bubble's first word often lands on its own OCR
-            // line and must not be silently dropped just because it's short.
-            if (letterCount >= 2 && t.all { it.isLetter() }) return false
-            // Expressive reactions ending with ? or ! (huh?, oh!, huh!, no!, wow?)
-            // are real dialogue even when short.
-            val isExpressive = t.last() == '?' || t.last() == '!'
-            if (letterCount >= 2 && isExpressive) return false
-            // Everything else at this length is an OCR artifact / stray label.
-            return true
-        }
-        if (noisePunctOnly.matches(t)) return true        // ..., !!!, ♡, ~, —
-        if (noiseUiAction.matches(t)) return true         // SWIPE, NEXT, FOLLOW...
-        if (noiseUiMeta.containsMatchIn(t)) return true   // READ EPISODE, COMMENTS:...
-        if (noiseSfx.matches(t)) return true              // BOOM, CRASH, POOF...
-        if (noiseRepeat.matches(t)) return true           // HA HA, SOB SOB SOB...
-        if (noiseSymbol.matches(t)) return true           // *action*, [emotion]
-        if (noiseEmotion.matches(t)) return true          // SMILE, BLUSH, GLARE...
-        if (noiseLaugh.matches(t)) return true            // HAHA, KEKE, PFFT...
-        if (isSymbolGarble(t)) return true                // &아#@!&아#! — censor-style cursing/shouting
-        // Pure numeric / timestamp / percentage (page numbers, status bar, battery)
-        if (t.replace(Regex("[0-9:./%\\-\\s]"), "").isEmpty() && t.length <= 12) return true
-        // Clock time with AM/PM (phone-mockup status bars), e.g. "7:00 PM"
-        if (Regex("""^\d{1,2}:\d{2}\s*(AM|PM)$""", RegexOption.IGNORE_CASE).matches(t)) return true
-        return false
+        // Expand slightly beyond the text boundary to sample the actual
+        // background rather than the letter pixels themselves.
+        val pad = 10
+        val l = (box.left   - pad).coerceAtLeast(0)
+        val t = (box.top    - pad).coerceAtLeast(0)
+        val r = (box.right  + pad).coerceAtMost(bmp.width  - 1)
+        val b = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+
+        if (l >= r || t >= b) return true   // degenerate box — give benefit of doubt
+
+        // Sample pixels evenly along the four expanded edges.
+        val samples = mutableListOf<Int>()
+        val step = 10   // px between consecutive samples
+        var x = l; while (x <= r) { samples += bmp.getPixel(x, t); samples += bmp.getPixel(x, b); x += step }
+        var y = t; while (y <= b) { samples += bmp.getPixel(l, y); samples += bmp.getPixel(r, y); y += step }
+
+        if (samples.size < 4) return true   // too few samples — assume bubble
+
+        // Measure brightness variance (HSV Value channel: 0 = black, 1 = white).
+        val hsv = FloatArray(3)
+        val vals = samples.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
+        val mean = vals.average()
+        val variance = vals.sumOf { v -> (v - mean) * (v - mean) } / vals.size
+
+        // Empirical threshold: bubble backgrounds are nearly solid colour (variance
+        // ≈ 0–0.02). Textured artwork has high variation (variance ≫ 0.05). 0.04
+        // leaves comfortable margin for drop shadows and colour-gradient bubble fills.
+        return variance <= 0.04
     }
 
     // Garbled "censor scream" text: comics often represent unintelligible
