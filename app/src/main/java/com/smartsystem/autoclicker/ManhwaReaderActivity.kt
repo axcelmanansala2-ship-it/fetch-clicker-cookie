@@ -690,7 +690,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun isNoiseLine(line: String): Boolean {
         val t = line.trim()
-        if (t.length <= 1) return true                    // single char — OCR artifact
+        if (t.length in 1..5) return true                 // too short to be real dialogue — OCR artifact / stray label
         if (noisePunctOnly.matches(t)) return true        // ..., !!!, ♡, ~, —
         if (noiseUiAction.matches(t)) return true         // SWIPE, NEXT, FOLLOW...
         if (noiseUiMeta.containsMatchIn(t)) return true   // READ EPISODE, COMMENTS:...
@@ -718,12 +718,23 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         return symbols >= 3 && symbols > letters
     }
 
+    // Stammer/stutter dialogue like "W-What", "I-I", "S-Stop" reads badly if the
+    // TTS spells out the lone leading letter(s) as an abbreviation (e.g. "double
+    // U, what") instead of a stammer sound. Since real stammering can't be
+    // synthesized reliably, drop the repeated stutter prefix and speak the
+    // intended word cleanly instead — "W-What" -> "What".
+    // Only matches when the letter(s) before the hyphen repeat the start of the
+    // following word, so real hyphenated words (e-mail, X-ray, T-shirt) are left
+    // untouched.
+    private val stutterPrefix = Regex("""\b([A-Za-z]{1,2})-(?=\1)""", RegexOption.IGNORE_CASE)
+
     // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
     // as words, never as abbreviations spelled letter-by-letter.
     // DOKJA -> dokja, AXCEL -> axcel, RATTLE -> rattle
     // Single uppercase letters (pronoun 'I') are left unchanged.
     private fun normalizeForTts(text: String): String =
-        text.replace(Regex("[A-Z]{2,}")) { m -> m.value.lowercase() }
+        text.replace(stutterPrefix, "")
+            .replace(Regex("[A-Z]{2,}")) { m -> m.value.lowercase() }
 
     private suspend fun speakAndWait(text: String): Unit = suspendCoroutine { cont ->
         val uid = "chunk_${System.currentTimeMillis()}"
