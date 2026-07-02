@@ -1,7 +1,9 @@
 package com.smartsystem.autoclicker
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -41,14 +43,47 @@ class MainActivity : AppCompatActivity() {
         binding.btnStartService.setOnClickListener { startOverlayService() }
         binding.btnStopService.setOnClickListener { stopOverlayService() }
 
-        // NEW: Account Checker
         binding.btnAccountChecker.setOnClickListener {
             startActivity(Intent(this, AccountCheckerActivity::class.java))
         }
 
-        // NEW: SSO Key Service
         binding.btnSsoKey.setOnClickListener { toggleSsoService() }
+
+        // NEW: Aim Lock (Bullseye Tracker)
+        binding.btnAimLock.setOnClickListener { requestScreenCapture() }
     }
+
+    // ─── Aim Lock — request MediaProjection permission ────────────────────────
+
+    private fun requestScreenCapture() {
+        if (!hasOverlayPermission() || !isAccessibilityEnabled()) {
+            Toast.makeText(this, getString(R.string.status_missing), Toast.LENGTH_SHORT).show()
+            return
+        }
+        val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        @Suppress("DEPRECATION")
+        startActivityForResult(mgr.createScreenCaptureIntent(), REQUEST_MEDIA_PROJECTION)
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_MEDIA_PROJECTION) {
+            if (resultCode == Activity.RESULT_OK && data != null) {
+                val intent = Intent(this, AimLockService::class.java).apply {
+                    putExtra(AimLockService.EXTRA_RESULT_CODE, resultCode)
+                    putExtra(AimLockService.EXTRA_PROJECTION_DATA, data)
+                }
+                ContextCompat.startForegroundService(this, intent)
+                Toast.makeText(this, getString(R.string.msg_aim_lock_started), Toast.LENGTH_SHORT).show()
+                finish()
+            } else {
+                Toast.makeText(this, "Screen capture permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // ─── Existing helpers ─────────────────────────────────────────────────────
 
     private fun toggleSsoService() {
         if (!hasOverlayPermission() || !isAccessibilityEnabled()) {
@@ -110,5 +145,9 @@ class MainActivity : AppCompatActivity() {
             action = FloatingOverlayService.ACTION_STOP
         })
         Toast.makeText(this, getString(R.string.msg_service_stopped), Toast.LENGTH_SHORT).show()
+    }
+
+    companion object {
+        private const val REQUEST_MEDIA_PROJECTION = 1001
     }
 }
