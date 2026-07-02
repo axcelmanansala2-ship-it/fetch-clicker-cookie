@@ -520,6 +520,12 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // held again, next chunk reinserted again, held again... forever, so
             // it never actually gets spoken (feels like the line was "skipped").
             var resumedRaw = false
+            // True when a previously-held line was found merged into a longer line in
+            // this chunk. In that case the bottom line of THIS chunk must NOT be held
+            // again even if it still lacks terminal punctuation — we already waited
+            // one chunk for it, holding it a second time would cause the same
+            // infinite-hold loop the resumedRaw guard protects against above.
+            var wasHeldAndMerged = false
             heldLine?.let { held ->
                 val alreadyMerged = allLines.any {
                     it.startsWith(held, ignoreCase = true) || it.contains(held, ignoreCase = true)
@@ -527,6 +533,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 if (!alreadyMerged) {
                     allLines.add(0, held)
                     resumedRaw = true
+                } else {
+                    wasHeldAndMerged = true
                 }
                 heldLine = null
             }
@@ -541,8 +549,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (allLines.isNotEmpty()) {
                 val last = allLines.last()
                 val isRawResumedLineOnly = resumedRaw && allLines.size == 1
-                val looksComplete = last.isEmpty() || last.last() in ".!?\u2026\"'\u201d\u2019)]"
-                if (!looksComplete && !isFinalChunk && !isRawResumedLineOnly) {
+                val looksComplete = last.isEmpty() || last.last() in ".!?,\u2026\"'\u201d\u2019)]\u3002"
+                // Don't re-hold a line that was already held once and came back merged —
+                // wasHeldAndMerged means we already gave it one extra chunk to complete.
+                if (!looksComplete && !isFinalChunk && !isRawResumedLineOnly && !wasHeldAndMerged) {
                     allLines.removeAt(allLines.lastIndex)
                     heldLine = last
                 }
@@ -725,7 +735,15 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun isNoiseLine(line: String): Boolean {
         val t = line.trim()
-        if (t.length in 1..5) return true                 // too short to be real dialogue — OCR artifact / stray label
+        if (t.length in 1..5) {
+            // Exception: short but expressive — genuine reaction words like "huh?",
+            // "oh!", "no!", "wow?" that contain real letters AND end with ?/!
+            // These are real dialogue, not OCR artifacts or stray labels.
+            val letterCount = t.count { it.isLetter() }
+            val isExpressive = t.last() == '?' || t.last() == '!'
+            if (letterCount >= 2 && isExpressive) return false   // keep "huh?", "no!", etc.
+            return true
+        }
         if (noisePunctOnly.matches(t)) return true        // ..., !!!, ♡, ~, —
         if (noiseUiAction.matches(t)) return true         // SWIPE, NEXT, FOLLOW...
         if (noiseUiMeta.containsMatchIn(t)) return true   // READ EPISODE, COMMENTS:...
@@ -747,10 +765,19 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // e.g. "&아#@!&아#!", "#$%&!!", "@!#$%^". This can't be meaningfully
     // spoken by TTS, so treat any line where symbols outnumber real letters
     // as noise, regardless of the exact characters involved.
+    //
+    // Exception: a real word followed by expressive punctuation like "HELL...?!",
+    // "NO!!!", "WHY?!", "STOP!!" — the word part is all letters/spaces so TTS
+    // can read it; the trailing punctuation is just emphasis, not garble.
     private fun isSymbolGarble(t: String): Boolean {
         val letters = t.count { it.isLetter() }
         val symbols = t.count { !it.isLetterOrDigit() && !it.isWhitespace() }
-        return symbols >= 3 && symbols > letters
+        if (symbols < 3 || symbols <= letters) return false
+        // Check if stripping trailing expressive punctuation (., !, ?, …, ~)
+        // leaves a pure-word string — if so it's a real word + emphasis, not garble.
+        val wordPart = t.trimEnd('.', '!', '?', '\u2026', '~', ' ')
+        if (wordPart.isNotEmpty() && wordPart.all { it.isLetter() || it.isWhitespace() }) return false
+        return true
     }
 
     // Stammer/stutter dialogue like "W-What", "I-I", "S-Stop" reads badly if the
