@@ -9,6 +9,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Point
 import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -43,6 +44,8 @@ import java.io.File
 import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
+import kotlin.math.atan2
+import kotlin.math.abs
 
 class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -452,10 +455,15 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             if (!isReading) return false
 
-            // Split OCR result; skip blank lines and UI noise overlays (SWIPE, TAP, etc.)
-            val allLines = text.split("\n")
-                .map { it.trim() }
-                .filter { it.isNotBlank() && !isNoiseLine(it) }
+            // Skip blank lines, known UI/SFX noise words, AND anything drawn at an
+            // angle (tilted/curved text) — real dialogue is flat inside a bubble,
+            // decorative reaction/SFX text almost never is, no matter its color,
+            // shape, or exact wording.
+            val allLines = text
+                .map { OcrLine(it.text.trim(), it.rotatedDeg) }
+                .filter { it.text.isNotBlank() }
+                .filter { !isNoiseLine(it.text) && abs(it.rotatedDeg) < ROTATED_NOISE_DEG }
+                .map { it.text }
                 .toMutableList()
 
             // The bottom-most line of a chunk may be a sentence sliced in half by the
@@ -550,9 +558,18 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
         }
 
+    // A recognized line of text plus how tilted its source block is.
+    // Real dialogue sits flat inside a speech bubble; decorative SFX / reaction
+    // labels (STARE, MURMUR, sound effects, etc.) are almost always drawn at an
+    // angle, curved, or stylized — regardless of their color, box shape, or the
+    // specific word used. Using rotation as a signal lets us auto-ignore noise
+    // we've never seen the exact wording of before, instead of relying only on
+    // an ever-growing word list.
+    private data class OcrLine(val text: String, val rotatedDeg: Float)
+
     // Sort text blocks top-to-bottom then left-to-right so multi-column panels
     // (speech bubbles side-by-side) are read in the correct visual sequence.
-    private suspend fun recognizeText(bmp: Bitmap): String = suspendCoroutine { cont ->
+    private suspend fun recognizeText(bmp: Bitmap): List<OcrLine> = suspendCoroutine { cont ->
         recognizer.process(InputImage.fromBitmap(bmp, 0))
             .addOnSuccessListener { result ->
                 val sorted = result.textBlocks
@@ -560,11 +577,30 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         { it.boundingBox?.top  ?: 0 },
                         { it.boundingBox?.left ?: 0 }
                     ))
-                    .joinToString("\n") { it.text }
-                cont.resume(sorted)
+                val lines = mutableListOf<OcrLine>()
+                for (block in sorted) {
+                    val angle = blockRotationDegrees(block.cornerPoints)
+                    block.text.split("\n").forEach { lines.add(OcrLine(it, angle)) }
+                }
+                cont.resume(lines)
             }
-            .addOnFailureListener { cont.resume("") }
+            .addOnFailureListener { cont.resume(emptyList()) }
     }
+
+    // Angle (in degrees) of the top edge of a text block relative to horizontal.
+    // 0° = perfectly flat (normal dialogue). Large values = tilted/curved/rotated
+    // decorative text (typical of onomatopoeia and reaction labels).
+    private fun blockRotationDegrees(corners: Array<Point>?): Float {
+        if (corners == null || corners.size < 2) return 0f
+        val dx = (corners[1].x - corners[0].x).toFloat()
+        val dy = (corners[1].y - corners[0].y).toFloat()
+        if (dx == 0f && dy == 0f) return 0f
+        return Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
+    }
+
+    // Any recognized text block tilted more than this many degrees from
+    // horizontal is treated as decorative SFX/reaction text, not dialogue.
+    private val ROTATED_NOISE_DEG = 15f
 
     // ── Noise filter: lines matching any of these patterns are silently skipped ──
     //
@@ -619,7 +655,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     /**
      * Returns true if the line is visual/UI noise that should never be spoken.
      * Covers: gesture/nav overlays, app metadata, pure SFX, repetitive syllables,
-     * symbol-wrapped text, pure punctuation, and bare numeric/timestamp lines.
+     * symbol-wrapped text, pure punctuation, bare numeric/timestamp lines, and
+     * garbled "censor scream" text (mostly symbols, unreadable as words).
      */
     private fun isNoiseLine(line: String): Boolean {
         val t = line.trim()
@@ -632,9 +669,21 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (noiseSymbol.matches(t)) return true           // *action*, [emotion]
         if (noiseEmotion.matches(t)) return true          // SMILE, BLUSH, GLARE...
         if (noiseLaugh.matches(t)) return true            // HAHA, KEKE, PFFT...
+        if (isSymbolGarble(t)) return true                // &아#@!&아#! — censor-style cursing/shouting
         // Pure numeric / timestamp / percentage (page numbers, status bar, battery)
         if (t.replace(Regex("[0-9:./%\\-\\s]"), "").isEmpty() && t.length <= 12) return true
         return false
+    }
+
+    // Garbled "censor scream" text: comics often represent unintelligible
+    // shouting/cursing as a jumble of symbols mixed with stray characters,
+    // e.g. "&아#@!&아#!", "#$%&!!", "@!#$%^". This can't be meaningfully
+    // spoken by TTS, so treat any line where symbols outnumber real letters
+    // as noise, regardless of the exact characters involved.
+    private fun isSymbolGarble(t: String): Boolean {
+        val letters = t.count { it.isLetter() }
+        val symbols = t.count { !it.isLetterOrDigit() && !it.isWhitespace() }
+        return symbols >= 3 && symbols > letters
     }
 
     // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
