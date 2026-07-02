@@ -194,18 +194,6 @@
             android:backgroundTint="#7B5EA7"
             android:textColor="@color/colorPrimary"
             android:textSize="15sp"
-            android:textStyle="bold"
-            android:layout_marginBottom="8dp" />
-
-        <!-- Aim Lock (Bullseye Tracker) — NEW -->
-        <Button
-            android:id="@+id/btnAimLock"
-            android:layout_width="match_parent"
-            android:layout_height="52dp"
-            android:text="@string/btn_aim_lock"
-            android:backgroundTint="@color/colorAimLockStart"
-            android:textColor="@color/colorPrimary"
-            android:textSize="15sp"
             android:textStyle="bold" />
 
     </LinearLayout>
