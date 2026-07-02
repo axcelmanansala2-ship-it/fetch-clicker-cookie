@@ -16,7 +16,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:adjustViewBounds="true"
-            android:scaleType="fitWidth"
+            android:scaleType="fitCenter"
             android:contentDescription="Manhwa page" />
     </ScrollView>
 
@@ -50,7 +50,7 @@
             android:id="@+id/btnReadPause"
             android:layout_width="56dp"
             android:layout_height="56dp"
-            android:text="▶"
+            android:text="&#9654;"
             android:textSize="22sp"
             android:backgroundTint="@color/colorSecondary"
             android:textColor="@color/colorPrimary"
@@ -61,7 +61,7 @@
             android:id="@+id/btnManhwaStop"
             android:layout_width="56dp"
             android:layout_height="44dp"
-            android:text="⏹"
+            android:text="&#9209;"
             android:textSize="18sp"
             android:backgroundTint="@color/colorError"
             android:textColor="#FFFFFF"
@@ -72,8 +72,8 @@
             android:id="@+id/btnAutoScroll"
             android:layout_width="56dp"
             android:layout_height="44dp"
-            android:textOn="↕ ON"
-            android:textOff="↕ OFF"
+            android:textOn="&#8597; ON"
+            android:textOff="&#8597; OFF"
             android:textSize="9sp"
             android:checked="true"
             android:backgroundTint="@color/colorManhwaAccent"
