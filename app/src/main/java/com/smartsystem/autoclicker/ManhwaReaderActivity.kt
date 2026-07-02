@@ -3,13 +3,20 @@ package com.smartsystem.autoclicker
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.Button
 import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
@@ -20,6 +27,7 @@ import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.*
+import java.io.File
 import java.util.Locale
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
@@ -27,7 +35,7 @@ import kotlin.coroutines.suspendCoroutine
 class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private lateinit var scrollView: ScrollView
-    private lateinit var imageView: ImageView
+    private lateinit var pagesContainer: LinearLayout
     private lateinit var tvStatus: TextView
     private lateinit var btnReadPause: Button
     private lateinit var btnStop: Button
@@ -38,7 +46,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isReading = false
     private var autoScrollEnabled = true
     private var readingJob: Job? = null
-    private var fullBitmap: Bitmap? = null
+    private val pageBitmaps = mutableListOf<Bitmap>()
+    private var currentPageIndex = 0
 
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
 
@@ -46,15 +55,15 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_manhwa_reader)
 
-        scrollView    = findViewById(R.id.manhwaScrollView)
-        imageView     = findViewById(R.id.manhwaImageView)
-        tvStatus      = findViewById(R.id.tvManhwaStatus)
-        btnReadPause  = findViewById(R.id.btnReadPause)
-        btnStop       = findViewById(R.id.btnManhwaStop)
-        btnAutoScroll = findViewById(R.id.btnAutoScroll)
+        scrollView     = findViewById(R.id.manhwaScrollView)
+        pagesContainer = findViewById(R.id.pagesContainer)
+        tvStatus       = findViewById(R.id.tvManhwaStatus)
+        btnReadPause   = findViewById(R.id.btnReadPause)
+        btnStop        = findViewById(R.id.btnManhwaStop)
+        btnAutoScroll  = findViewById(R.id.btnAutoScroll)
 
         tts = TextToSpeech(this, this)
-        loadImageFromIntent()
+        loadFileFromIntent()
 
         btnReadPause.setOnClickListener {
             if (isReading) pauseReading() else startReading()
@@ -64,36 +73,106 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     @Suppress("DEPRECATION")
-    private fun loadImageFromIntent() {
+    private fun loadFileFromIntent() {
         val uri: Uri? = intent?.data
             ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 intent?.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
             else
                 intent?.getParcelableExtra(Intent.EXTRA_STREAM)
 
-        if (uri == null) {
-            tvStatus.text = "⚠ No file received"
-            return
-        }
-        try {
-            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
-            val stream = contentResolver.openInputStream(uri)
-                ?: run { tvStatus.text = "⚠ Cannot open file"; return }
-            fullBitmap = BitmapFactory.decodeStream(stream, null, opts)
-            stream.close()
-            imageView.setImageBitmap(fullBitmap)
-            tvStatus.text = "📖 Loaded"
-        } catch (e: Exception) {
-            tvStatus.text = "⚠ Error loading"
+        if (uri == null) { tvStatus.text = "⚠ No file received"; return }
+
+        tvStatus.text = "⏳ Loading..."
+        lifecycleScope.launch {
+            val bitmaps = withContext(Dispatchers.IO) {
+                val mimeType = contentResolver.getType(uri) ?: ""
+                val isPdf = mimeType.contains("pdf", ignoreCase = true)
+                            || uri.lastPathSegment?.endsWith(".pdf", ignoreCase = true) == true
+                if (isPdf) loadPdfPages(uri) else loadImagePage(uri)
+            }
+
+            if (bitmaps.isEmpty()) { tvStatus.text = "⚠ Could not load file"; return@launch }
+
+            pageBitmaps.clear()
+            pageBitmaps.addAll(bitmaps)
+            pagesContainer.removeAllViews()
+
+            for (bmp in bitmaps) {
+                val iv = ImageView(this@ManhwaReaderActivity).apply {
+                    setImageBitmap(bmp)
+                    layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                    adjustViewBounds = true
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                }
+                pagesContainer.addView(iv)
+            }
+
+            tvStatus.text = "📖 ${bitmaps.size} page(s)
+Tap ▶ to read"
         }
     }
 
+    // ── Loaders ──────────────────────────────────────────────────────────────
+
+    private fun loadImagePage(uri: Uri): List<Bitmap> {
+        return try {
+            val opts = BitmapFactory.Options().apply { inSampleSize = 2 }
+            val stream = contentResolver.openInputStream(uri) ?: return emptyList()
+            val bmp = BitmapFactory.decodeStream(stream, null, opts)
+            stream.close()
+            if (bmp != null) listOf(bmp) else emptyList()
+        } catch (e: Exception) { emptyList() }
+    }
+
+    private fun loadPdfPages(uri: Uri): List<Bitmap> {
+        val bitmaps = mutableListOf<Bitmap>()
+        var fd: ParcelFileDescriptor? = null
+        var renderer: PdfRenderer? = null
+        try {
+            fd = openPdfDescriptor(uri) ?: return emptyList()
+            renderer = PdfRenderer(fd)
+            val screenWidth = resources.displayMetrics.widthPixels
+
+            for (i in 0 until renderer.pageCount) {
+                val page = renderer.openPage(i)
+                val scale = screenWidth.toFloat() / page.width.coerceAtLeast(1)
+                val pageH = (page.height * scale).toInt().coerceAtLeast(1)
+                val bmp = Bitmap.createBitmap(screenWidth, pageH, Bitmap.Config.ARGB_8888)
+                Canvas(bmp).drawColor(Color.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+                bitmaps.add(bmp)
+            }
+        } catch (e: Exception) {
+            /* return what we have */
+        } finally {
+            renderer?.close()
+            fd?.close()
+        }
+        return bitmaps
+    }
+
+    private fun openPdfDescriptor(uri: Uri): ParcelFileDescriptor? {
+        return try {
+            contentResolver.openFileDescriptor(uri, "r")
+        } catch (e: Exception) {
+            // Fallback: copy to cache file (needed for seekable FD)
+            try {
+                val tmp = File(cacheDir, "manhwa_tmp.pdf")
+                contentResolver.openInputStream(uri)?.use { it.copyTo(tmp.outputStream()) }
+                ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
+            } catch (e2: Exception) { null }
+        }
+    }
+
+    // ── Reading logic ─────────────────────────────────────────────────────────
+
     private fun startReading() {
         if (!ttsReady) { Toast.makeText(this, "TTS not ready yet", Toast.LENGTH_SHORT).show(); return }
-        if (fullBitmap == null) { Toast.makeText(this, "No image loaded", Toast.LENGTH_SHORT).show(); return }
+        if (pageBitmaps.isEmpty()) { Toast.makeText(this, "No pages loaded", Toast.LENGTH_SHORT).show(); return }
         isReading = true
         btnReadPause.text = "⏸"
-        readingJob = lifecycleScope.launch { readPanels() }
+        readingJob = lifecycleScope.launch { readPages(currentPageIndex) }
     }
 
     private fun pauseReading() {
@@ -101,7 +180,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts?.stop()
         readingJob?.cancel()
         btnReadPause.text = "▶"
-        tvStatus.text = "⏸ Paused"
+        tvStatus.text = "⏸ Paused
+p.${currentPageIndex + 1}"
     }
 
     private fun stopReading() {
@@ -109,53 +189,41 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tts?.stop()
         readingJob?.cancel()
         btnReadPause.text = "▶"
+        currentPageIndex = 0
         tvStatus.text = "⏹ Stopped"
         scrollView.smoothScrollTo(0, 0)
     }
 
-    private suspend fun readPanels() {
-        if (imageView.height == 0) delay(600)
-        val imgH   = imageView.height.takeIf { it > 0 } ?: return
-        val screenH = scrollView.height.takeIf { it > 0 } ?: return
-        val bmp    = fullBitmap ?: return
+    private suspend fun readPages(startIndex: Int) {
+        for (i in startIndex until pageBitmaps.size) {
+            if (!isReading) break
+            currentPageIndex = i
+            tvStatus.text = "🔍 Scanning
+p.${i + 1}/${pageBitmaps.size}"
 
-        var scrollY  = scrollView.scrollY
-        var panelNum = 0
-
-        while (isReading && scrollY < imgH) {
-            val panelBottom = (scrollY + screenH).coerceAtMost(imgH)
-            val scaleY  = bmp.height.toFloat() / imgH
-            val bmpTop  = (scrollY * scaleY).toInt().coerceIn(0, bmp.height - 1)
-            val bmpH    = ((panelBottom - scrollY) * scaleY).toInt()
-                .coerceAtLeast(1).coerceAtMost(bmp.height - bmpTop)
-
-            val slice = Bitmap.createBitmap(bmp, 0, bmpTop, bmp.width, bmpH)
-            tvStatus.text = "🔍 Detecting..."
-
-            val text = withContext(Dispatchers.IO) { recognizeText(slice) }
-            slice.recycle()
-
+            val text = withContext(Dispatchers.IO) { recognizeText(pageBitmaps[i]) }
             if (!isReading) break
 
             if (text.isNotBlank()) {
-                panelNum++
-                tvStatus.text = "🔊 Panel $panelNum"
+                tvStatus.text = "🔊 Reading
+p.${i + 1}"
                 speakAndWait(text)
                 if (!isReading) break
 
-                if (autoScrollEnabled) {
-                    val nextY = scrollY + screenH
-                    withContext(Dispatchers.Main) { scrollView.smoothScrollTo(0, nextY) }
-                    delay(1000)
-                    scrollY = withContext(Dispatchers.Main) { scrollView.scrollY }
-                } else {
-                    tvStatus.text = "✅ Panel $panelNum done\nScroll manually"
-                    isReading = false
-                    btnReadPause.text = "▶"
-                    break
+                // Auto-scroll to next page
+                if (autoScrollEnabled && i + 1 < pageBitmaps.size) {
+                    val nextView = pagesContainer.getChildAt(i + 1)
+                    if (nextView != null) {
+                        scrollView.smoothScrollTo(0, nextView.top)
+                        delay(800)
+                    }
                 }
             } else {
-                tvStatus.text = "📷 No text here\nScroll & tap ▶"
+                // No text — pause and let user scroll manually
+                currentPageIndex = i + 1
+                tvStatus.text = "📷 No text
+p.${i + 1}
+Scroll & ▶"
                 isReading = false
                 btnReadPause.text = "▶"
                 break
@@ -165,6 +233,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (isReading) {
             tvStatus.text = "✅ Done!"
             isReading = false
+            currentPageIndex = 0
             btnReadPause.text = "▶"
         }
     }
@@ -176,7 +245,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     private suspend fun speakAndWait(text: String): Unit = suspendCoroutine { cont ->
-        val uid = "panel_${System.currentTimeMillis()}"
+        val uid = "page_${System.currentTimeMillis()}"
         tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(id: String?) {}
             override fun onDone(id: String?)  { if (id == uid) cont.resume(Unit) }
@@ -189,7 +258,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         ttsReady = status == TextToSpeech.SUCCESS
         if (ttsReady) {
             tts?.language = Locale.ENGLISH
-            tvStatus.text = "📖 Ready\nTap ▶ to read"
+            if (pageBitmaps.isNotEmpty()) tvStatus.text = "📖 Ready
+Tap ▶ to read"
         } else {
             tvStatus.text = "⚠ TTS failed"
         }
@@ -200,6 +270,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         readingJob?.cancel()
         tts?.shutdown()
         recognizer.close()
-        fullBitmap?.recycle()
+        pageBitmaps.forEach { it.recycle() }
+        pageBitmaps.clear()
     }
 }
