@@ -438,8 +438,17 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         highlightPage(pageIdx)
         updatePageCounter(pageIdx)
-        spokenLines.clear()  // fresh per page — prevents re-reading overlap regions
-        heldLine = null      // fresh per page — no carry-over cut-off line across pages
+        // Only reset the "already spoken" history when actually starting this page
+        // from the top. readCurrentPage() can be re-entered mid-page (e.g. user
+        // paused in manual-scroll mode, or pressed play again partway through),
+        // and currentChunkOffset preserves exactly where it left off — but wiping
+        // spokenLines/heldLine on every re-entry made the overlap region at that
+        // resume point look "new" again, so it got read out loud a second time.
+        // Only clear when this is a genuinely fresh page (offset 0).
+        if (currentChunkOffset == 0) {
+            spokenLines.clear()
+            heldLine = null
+        }
 
         var chunkOffset = currentChunkOffset
 
@@ -505,12 +514,19 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // the held text plus its continuation, so we just let it through as-is.
             // If no matching line is found this round (OCR line-split differences
             // between chunks), speak the held text directly so it is never dropped.
+            // Tracks whether the held phrase was reinserted "raw" (no continuation
+            // found yet) — if so, it must NOT be immediately re-held below, or it
+            // would loop forever: reinserted, still lacks terminal punctuation,
+            // held again, next chunk reinserted again, held again... forever, so
+            // it never actually gets spoken (feels like the line was "skipped").
+            var resumedRaw = false
             heldLine?.let { held ->
                 val alreadyMerged = allLines.any {
                     it.startsWith(held, ignoreCase = true) || it.contains(held, ignoreCase = true)
                 }
                 if (!alreadyMerged) {
                     allLines.add(0, held)
+                    resumedRaw = true
                 }
                 heldLine = null
             }
@@ -524,8 +540,9 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val isFinalChunk = chunkEnd >= pageH
             if (allLines.isNotEmpty()) {
                 val last = allLines.last()
+                val isRawResumedLineOnly = resumedRaw && allLines.size == 1
                 val looksComplete = last.isEmpty() || last.last() in ".!?\u2026\"'\u201d\u2019)]"
-                if (!looksComplete && !isFinalChunk) {
+                if (!looksComplete && !isFinalChunk && !isRawResumedLineOnly) {
                     allLines.removeAt(allLines.lastIndex)
                     heldLine = last
                 }
