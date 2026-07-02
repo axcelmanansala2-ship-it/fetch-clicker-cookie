@@ -80,9 +80,9 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             else
                 intent?.getParcelableExtra(Intent.EXTRA_STREAM)
 
-        if (uri == null) { tvStatus.text = "⚠ No file received"; return }
+        if (uri == null) { tvStatus.text = "No file received"; return }
 
-        tvStatus.text = "⏳ Loading..."
+        tvStatus.text = "Loading..."
         lifecycleScope.launch {
             val bitmaps = withContext(Dispatchers.IO) {
                 val mimeType = contentResolver.getType(uri) ?: ""
@@ -91,7 +91,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 if (isPdf) loadPdfPages(uri) else loadImagePage(uri)
             }
 
-            if (bitmaps.isEmpty()) { tvStatus.text = "⚠ Could not load file"; return@launch }
+            if (bitmaps.isEmpty()) { tvStatus.text = "Load failed"; return@launch }
 
             pageBitmaps.clear()
             pageBitmaps.addAll(bitmaps)
@@ -107,8 +107,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 pagesContainer.addView(iv)
             }
 
-            tvStatus.text = "📖 ${bitmaps.size} page(s)
-Tap ▶ to read"
+            val count = bitmaps.size
+            tvStatus.text = "$count pages\nTap Play"
         }
     }
 
@@ -144,7 +144,7 @@ Tap ▶ to read"
                 bitmaps.add(bmp)
             }
         } catch (e: Exception) {
-            /* return what we have */
+            // return whatever pages loaded so far
         } finally {
             renderer?.close()
             fd?.close()
@@ -156,7 +156,6 @@ Tap ▶ to read"
         return try {
             contentResolver.openFileDescriptor(uri, "r")
         } catch (e: Exception) {
-            // Fallback: copy to cache file (needed for seekable FD)
             try {
                 val tmp = File(cacheDir, "manhwa_tmp.pdf")
                 contentResolver.openInputStream(uri)?.use { it.copyTo(tmp.outputStream()) }
@@ -168,10 +167,10 @@ Tap ▶ to read"
     // ── Reading logic ─────────────────────────────────────────────────────────
 
     private fun startReading() {
-        if (!ttsReady) { Toast.makeText(this, "TTS not ready yet", Toast.LENGTH_SHORT).show(); return }
+        if (!ttsReady) { Toast.makeText(this, "TTS not ready", Toast.LENGTH_SHORT).show(); return }
         if (pageBitmaps.isEmpty()) { Toast.makeText(this, "No pages loaded", Toast.LENGTH_SHORT).show(); return }
         isReading = true
-        btnReadPause.text = "⏸"
+        btnReadPause.text = "\u23F8"
         readingJob = lifecycleScope.launch { readPages(currentPageIndex) }
     }
 
@@ -179,39 +178,38 @@ Tap ▶ to read"
         isReading = false
         tts?.stop()
         readingJob?.cancel()
-        btnReadPause.text = "▶"
-        tvStatus.text = "⏸ Paused
-p.${currentPageIndex + 1}"
+        btnReadPause.text = "\u25B6"
+        val pg = currentPageIndex + 1
+        tvStatus.text = "Paused p.$pg"
     }
 
     private fun stopReading() {
         isReading = false
         tts?.stop()
         readingJob?.cancel()
-        btnReadPause.text = "▶"
+        btnReadPause.text = "\u25B6"
         currentPageIndex = 0
-        tvStatus.text = "⏹ Stopped"
+        tvStatus.text = "Stopped"
         scrollView.smoothScrollTo(0, 0)
     }
 
     private suspend fun readPages(startIndex: Int) {
-        for (i in startIndex until pageBitmaps.size) {
+        val total = pageBitmaps.size
+        for (i in startIndex until total) {
             if (!isReading) break
             currentPageIndex = i
-            tvStatus.text = "🔍 Scanning
-p.${i + 1}/${pageBitmaps.size}"
+            val pg = i + 1
+            tvStatus.text = "Scan $pg/$total"
 
             val text = withContext(Dispatchers.IO) { recognizeText(pageBitmaps[i]) }
             if (!isReading) break
 
             if (text.isNotBlank()) {
-                tvStatus.text = "🔊 Reading
-p.${i + 1}"
+                tvStatus.text = "Read $pg/$total"
                 speakAndWait(text)
                 if (!isReading) break
 
-                // Auto-scroll to next page
-                if (autoScrollEnabled && i + 1 < pageBitmaps.size) {
+                if (autoScrollEnabled && i + 1 < total) {
                     val nextView = pagesContainer.getChildAt(i + 1)
                     if (nextView != null) {
                         scrollView.smoothScrollTo(0, nextView.top)
@@ -219,22 +217,19 @@ p.${i + 1}"
                     }
                 }
             } else {
-                // No text — pause and let user scroll manually
                 currentPageIndex = i + 1
-                tvStatus.text = "📷 No text
-p.${i + 1}
-Scroll & ▶"
+                tvStatus.text = "No text p.$pg\nScroll & Play"
                 isReading = false
-                btnReadPause.text = "▶"
+                btnReadPause.text = "\u25B6"
                 break
             }
         }
 
         if (isReading) {
-            tvStatus.text = "✅ Done!"
+            tvStatus.text = "Done!"
             isReading = false
             currentPageIndex = 0
-            btnReadPause.text = "▶"
+            btnReadPause.text = "\u25B6"
         }
     }
 
@@ -258,10 +253,9 @@ Scroll & ▶"
         ttsReady = status == TextToSpeech.SUCCESS
         if (ttsReady) {
             tts?.language = Locale.ENGLISH
-            if (pageBitmaps.isNotEmpty()) tvStatus.text = "📖 Ready
-Tap ▶ to read"
+            if (pageBitmaps.isNotEmpty()) tvStatus.text = "Ready\nTap Play"
         } else {
-            tvStatus.text = "⚠ TTS failed"
+            tvStatus.text = "TTS failed"
         }
     }
 
