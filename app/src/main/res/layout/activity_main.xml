@@ -119,7 +119,7 @@
                 android:textColor="@color/colorSecondary" />
         </LinearLayout>
 
-        <!-- Divider label -->
+        <!-- AUTO-CLICKER SECTION -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -130,7 +130,6 @@
             android:letterSpacing="0.1"
             android:layout_marginBottom="8dp" />
 
-        <!-- Manage Targets -->
         <Button
             android:id="@+id/btnManageTargets"
             android:layout_width="match_parent"
@@ -140,7 +139,6 @@
             android:textColor="@color/colorOnBackground"
             android:layout_marginBottom="8dp" />
 
-        <!-- Start overlay -->
         <Button
             android:id="@+id/btnStartService"
             android:layout_width="match_parent"
@@ -162,7 +160,7 @@
             android:textColor="@color/colorError"
             android:layout_marginBottom="24dp" />
 
-        <!-- Divider label -->
+        <!-- COD MOBILE TOOLS SECTION -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -173,7 +171,6 @@
             android:letterSpacing="0.1"
             android:layout_marginBottom="8dp" />
 
-        <!-- Account Checker -->
         <Button
             android:id="@+id/btnAccountChecker"
             android:layout_width="match_parent"
@@ -185,13 +182,34 @@
             android:textStyle="bold"
             android:layout_marginBottom="8dp" />
 
-        <!-- SSO Key Service -->
         <Button
             android:id="@+id/btnSsoKey"
             android:layout_width="match_parent"
             android:layout_height="52dp"
             android:text="@string/btn_sso_key"
             android:backgroundTint="#7B5EA7"
+            android:textColor="@color/colorPrimary"
+            android:textSize="15sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="24dp" />
+
+        <!-- MANHWA READER SECTION -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="MANHWA READER"
+            android:textColor="@color/colorManhwaAccent"
+            android:textSize="11sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.1"
+            android:layout_marginBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnManhwaReader"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:text="@string/btn_manhwa_reader"
+            android:backgroundTint="@color/colorManhwaAccent"
             android:textColor="@color/colorPrimary"
             android:textSize="15sp"
             android:textStyle="bold" />
