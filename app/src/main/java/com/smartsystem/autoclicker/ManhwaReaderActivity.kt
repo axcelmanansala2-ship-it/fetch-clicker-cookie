@@ -492,19 +492,42 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             if (startY == targetY) { cont.resume(Unit); return@suspendCoroutine }
             val anim = ValueAnimator.ofInt(startY, targetY).apply {
                 duration = durationMs
-                interpolator = LinearInterpolator()
+                // DecelerateInterpolator feels more natural than Linear
+                interpolator = android.view.animation.DecelerateInterpolator()
                 addUpdateListener { anim -> scrollView.scrollTo(0, anim.animatedValue as Int) }
                 addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(a: Animator)    { cont.resume(Unit) }
-                    override fun onAnimationCancel(a: Animator) { cont.resume(Unit) }
+                    override fun onAnimationEnd(a: Animator) {
+                        // Release GPU cache after scroll completes
+                        pagesContainer.setLayerType(View.LAYER_TYPE_NONE, null)
+                        cont.resume(Unit)
+                    }
+                    override fun onAnimationCancel(a: Animator) {
+                        pagesContainer.setLayerType(View.LAYER_TYPE_NONE, null)
+                        cont.resume(Unit)
+                    }
                 })
             }
-            scrollView.post { anim.start() }
+            scrollView.post {
+                // GPU-cache the content during scroll: each frame is a texture
+                // composite instead of a full software redraw — eliminates lag
+                pagesContainer.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                anim.start()
+            }
         }
 
+    // Sort text blocks top-to-bottom then left-to-right so multi-column panels
+    // (speech bubbles side-by-side) are read in the correct visual sequence.
     private suspend fun recognizeText(bmp: Bitmap): String = suspendCoroutine { cont ->
         recognizer.process(InputImage.fromBitmap(bmp, 0))
-            .addOnSuccessListener { result -> cont.resume(result.text) }
+            .addOnSuccessListener { result ->
+                val sorted = result.textBlocks
+                    .sortedWith(compareBy(
+                        { it.boundingBox?.top  ?: 0 },
+                        { it.boundingBox?.left ?: 0 }
+                    ))
+                    .joinToString("\n") { it.text }
+                cont.resume(sorted)
+            }
             .addOnFailureListener { cont.resume("") }
     }
 
@@ -542,6 +565,19 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private val noisePunctOnly = Regex(
         """^[^a-zA-Z0-9]+$"""
     )
+    // 7. Single-word emotion / expression labels placed beside characters
+    //    e.g. "SMILE", "BLUSH", "GLARE" — visual annotations, not dialogue
+    private val noiseEmotion = Regex(
+        """^(SMILE|SMILING|SMIRK|SMIRKING|GRIN|GRINNING|LAUGH|LAUGHING|CHUCKLE|CHUCKLING|CRY|CRYING|WEEP|WEEPING|BLUSH|BLUSHING|WINK|WINKING|GLARE|GLARING|STARE|STARING|POUT|POUTING|YAWN|YAWNING|FREEZE|FROZEN|SHOCK|SHOCKED|SURPRISED|TREMBLING|SWEATING|SCREAMING|SHRUG|SHRUGGING|NOD|NODDING|PANIC|PANICKING|RAGE|SHIVER|SHIVERING|FIDGET|SULK|SULKING|SQUINT|SQUINTING|FROWN|FROWNING|SNIFFLE|SNIFFLING|SNEER|SNEERING|SCOFF|SCOFFING|TWITCH|TWITCHING|TENSE|TWITCHY|NERVOUS|EMBARRASSED)$""",
+        setOf(RegexOption.IGNORE_CASE)
+    )
+    // 8. Laughter/reaction without spaces: HAHA, HAHAHA, KEKE, PFFT, LOL…
+    //    Optional trailing punctuation (.!?~…) is allowed.
+    //    e.g. "HAHA...", "KEKEKE", "PFFT", "LOL"
+    private val noiseLaugh = Regex(
+        """^(A*HA+HA+|HE+HE+|HO+HO+|KE+KE+|FU+FU+|KY+A*HA+|AHA+|PFFT+|LMAO|LOL+|MUHA+|BWAHA+|GYAHA+|NYAHA+)[!?.~\u2026]*$""",
+        setOf(RegexOption.IGNORE_CASE)
+    )
 
     /**
      * Returns true if the line is visual/UI noise that should never be spoken.
@@ -557,12 +593,14 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (noiseSfx.matches(t)) return true              // BOOM, CRASH, POOF...
         if (noiseRepeat.matches(t)) return true           // HA HA, SOB SOB SOB...
         if (noiseSymbol.matches(t)) return true           // *action*, [emotion]
+        if (noiseEmotion.matches(t)) return true          // SMILE, BLUSH, GLARE...
+        if (noiseLaugh.matches(t)) return true            // HAHA, KEKE, PFFT...
         // Pure numeric / timestamp / percentage (page numbers, status bar, battery)
         if (t.replace(Regex("[0-9:./%\\-\\s]"), "").isEmpty() && t.length <= 12) return true
         return false
     }
 
-        // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
+    // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
     // as words, never as abbreviations spelled letter-by-letter.
     // DOKJA -> dokja, AXCEL -> axcel, RATTLE -> rattle
     // Single uppercase letters (pronoun 'I') are left unchanged.
