@@ -3,6 +3,7 @@
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
@@ -30,14 +31,12 @@
             </intent-filter>
         </activity>
 
-        <!-- Existing auto-clicker target setup -->
         <activity
             android:name=".TargetSetupActivity"
             android:exported="false"
             android:label="@string/title_target_setup"
             android:parentActivityName=".MainActivity" />
 
-        <!-- New COD account checker -->
         <activity
             android:name=".AccountCheckerActivity"
             android:exported="false"
@@ -47,7 +46,6 @@
 
         <!-- ── Services ───────────────────────────────────────────────── -->
 
-        <!-- Existing floating overlay / auto-click service -->
         <service
             android:name=".FloatingOverlayService"
             android:exported="false"
@@ -57,7 +55,6 @@
                 android:value="overlay" />
         </service>
 
-        <!-- COD account checker overlay service (separate from SSO) -->
         <service
             android:name=".AccountCheckerService"
             android:exported="false"
@@ -67,7 +64,6 @@
                 android:value="overlay" />
         </service>
 
-        <!-- SSO Key Service — standalone, separate from account checker -->
         <service
             android:name=".SsoKeyService"
             android:exported="false"
@@ -76,6 +72,12 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="overlay" />
         </service>
+
+        <!-- Aim Lock Service — uses MediaProjection for screen capture -->
+        <service
+            android:name=".AimLockService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <!-- Accessibility service (shared by all features) -->
         <service
