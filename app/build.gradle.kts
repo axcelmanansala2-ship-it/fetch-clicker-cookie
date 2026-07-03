@@ -45,6 +45,7 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.constraintlayout)
     implementation(libs.mlkit.text.recognition)
+    implementation(libs.mlkit.translate)
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.gson)
 }
