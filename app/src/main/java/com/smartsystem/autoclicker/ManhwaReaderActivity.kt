@@ -383,14 +383,17 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (autoScrollEnabled) {
             val firstBubbleIdx = nonEmpty.first().first
             val firstRect = bubbles[firstBubbleIdx].rect
-            if (pageFrame.height > 0) {
-                val scaleY = pageFrame.height.toFloat() / srcBitmap.height.coerceAtLeast(1)
-                val bubbleCentreInPage = ((firstRect.top + firstRect.bottom) / 2f * scaleY).toInt()
-                val targetScrollY = (pageFrame.top + bubbleCentreInPage - scrollView.height / 2)
-                    .coerceAtLeast(0)
-                withContext(Dispatchers.Main) {
-                    animatedScrollTo(targetScrollY, scrollDuration)
-                }
+            // Wait for the page frame to be laid out if it hasn't been measured yet
+            withContext(Dispatchers.Main) {
+                if (pageFrame.height == 0) delay(350)
+            }
+            val frameH = pageFrame.height.coerceAtLeast(1)
+            val scaleY = frameH.toFloat() / srcBitmap.height.coerceAtLeast(1)
+            val bubbleCentreInPage = ((firstRect.top + firstRect.bottom) / 2f * scaleY).toInt()
+            val targetScrollY = (pageFrame.top + bubbleCentreInPage - scrollView.height / 2)
+                .coerceAtLeast(0)
+            withContext(Dispatchers.Main) {
+                animatedScrollTo(targetScrollY, scrollDuration)
             }
         }
 
