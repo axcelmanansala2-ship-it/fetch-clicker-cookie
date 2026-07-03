@@ -279,11 +279,26 @@ object NovelTranslator {
         suspend fun appendTranslated(chunk: String) {
             if (chunk.isBlank()) {
                 sb.append(chunk)
-            } else {
-                val translated = translateChunk(chunk)
-                if (translated != null) anySuccess = true
-                sb.append(simplify(translated ?: chunk))
+                return
             }
+            // Translators (both ML Kit and free web APIs) commonly trim/collapse
+            // leading/trailing whitespace on whatever text they're given. Since chunks
+            // sit right up against protected spans, that trimming used to glue words
+            // together across a chunk/span boundary (e.g. "sateneksakto" instead of
+            // "sa ten eksakto"). Strip the whitespace out ourselves before translating
+            // and re-attach it verbatim afterward so spacing is always preserved.
+            val leadingWs = chunk.takeWhile { it.isWhitespace() }
+            val trailingWs = chunk.takeLastWhile { it.isWhitespace() }
+            val trimmed = chunk.trim()
+            if (trimmed.isEmpty()) {
+                sb.append(chunk)
+                return
+            }
+            val translated = translateChunk(trimmed)
+            if (translated != null) anySuccess = true
+            sb.append(leadingWs)
+            sb.append(simplify(translated ?: trimmed))
+            sb.append(trailingWs)
         }
 
         for (span in spans) {
