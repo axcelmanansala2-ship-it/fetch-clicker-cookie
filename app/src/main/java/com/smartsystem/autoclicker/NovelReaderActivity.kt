@@ -11,6 +11,7 @@ import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -21,6 +22,7 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.animation.DecelerateInterpolator
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.*
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -83,6 +85,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var readingJob: Job? = null
     private var scrollMs      = 500L
     private var fontSize      = 17f
+    private var currentFileUri: Uri? = null
 
     // ═════════════════════════════════════════════════════════════════════════
     // Lifecycle
@@ -147,6 +150,21 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             it.addRule(RelativeLayout.CENTER_IN_PARENT)
         }
 
+        val floatBtn = TextView(this).apply {
+            text = "🗗"
+            textSize = 19f
+            gravity = Gravity.CENTER
+            setTextColor(C_MUTED)
+            isClickable = true; isFocusable = true
+            foreground = rippleFg()
+            setOnClickListener { openOverlayMode() }
+        }
+        floatBtn.layoutParams = RelativeLayout.LayoutParams(dp(44).toInt(), dp(44).toInt()).also {
+            it.addRule(RelativeLayout.CENTER_VERTICAL)
+            it.addRule(RelativeLayout.ALIGN_PARENT_END)
+            it.marginEnd = dp(52).toInt()
+        }
+
         val gear = iconBtn(android.R.drawable.ic_menu_preferences, C_MUTED).apply {
             setOnClickListener { showSettings() }
         }
@@ -156,7 +174,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             it.marginEnd = dp(6).toInt()
         }
 
-        bar.addView(back); bar.addView(tvTitle); bar.addView(gear)
+        bar.addView(back); bar.addView(tvTitle); bar.addView(floatBtn); bar.addView(gear)
         return bar
     }
 
@@ -301,6 +319,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 intent?.getParcelableExtra(Intent.EXTRA_STREAM)
 
         if (uri == null) { showPlaceholder(); return }
+        currentFileUri = uri
         tvStatus.text = "Loading…"
 
         lifecycleScope.launch {
@@ -318,7 +337,44 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             tvTitle.text = if (name.length > 26) name.take(24) + "…" else name
 
             displayParagraphs(paras)
+
+            val resumePara = intent?.getIntExtra(EXTRA_START_PARA, -1) ?: -1
+            if (resumePara in paragraphs.indices) {
+                currentPara = resumePara
+                updateProgress()
+                scrollToPara(currentPara)
+                tvStatus.text = "Resumed from overlay — ${paragraphs.size} paragraphs"
+            }
         }
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Overlay mode
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private fun openOverlayMode() {
+        if (paragraphs.isEmpty()) {
+            Toast.makeText(this, "Open a file first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val uri = currentFileUri
+        if (uri == null) {
+            Toast.makeText(this, "File not available for overlay", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, "Allow \"Display over other apps\" first, then tap again", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")))
+            return
+        }
+        if (isReading) pauseReading()
+        val svcIntent = Intent(this, NovelReaderOverlayService::class.java).apply {
+            putExtra(NovelReaderOverlayService.EXTRA_FILE_URI, uri.toString())
+            putExtra(NovelReaderOverlayService.EXTRA_START_PARA, currentPara)
+        }
+        ContextCompat.startForegroundService(this, svcIntent)
+        moveTaskToBack(true)
     }
 
     private fun readContent(uri: Uri): String? {
@@ -724,5 +780,9 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
             .setNegativeButton("Cancel") { _, _ -> if (wasReading) startReading() }
             .show()
+    }
+
+    companion object {
+        const val EXTRA_START_PARA = "extra_start_para"
     }
 }
