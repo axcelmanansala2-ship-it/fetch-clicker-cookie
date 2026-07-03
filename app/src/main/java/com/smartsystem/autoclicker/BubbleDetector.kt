@@ -39,24 +39,26 @@ data class BubbleInfo(
 object BubbleDetector {
 
     // ── Bright-bubble tuning ───────────────────────────────────────────────────
+    // Thresholds are intentionally permissive — the OCR-filter in
+    // ManhwaReaderActivity is the real gatekeeper (hasRealContent).
     private const val WORK_WIDTH          = 360
-    private const val MIN_AREA            = 2000
-    private const val MAX_AREA_PCT        = 0.50f
-    private const val MIN_ASPECT          = 0.15f
-    private const val MAX_ASPECT          = 4.5f
-    private const val MIN_DIM             = 22
-    private const val MIN_FILL_RATIO      = 0.38f
-    private const val MIN_INTERIOR_BRIGHT = 140     // avg brightness of center 50% bbox
-    private const val MAX_INTERIOR_SAT    = 100     // avg HSV-sat of center 50% bbox
-    private const val BRIGHT_THRESH       = 160
-    private const val SAT_THRESH          = 55
-    private const val SAT_BRIGHT          = 60
-    private const val MAX_HULL_INPUT      = 200     // downsample boundary before hull
+    private const val MIN_AREA            = 1200    // was 2000 — catch smaller text boxes
+    private const val MAX_AREA_PCT        = 0.35f   // was 0.50f — reduce giant false positives
+    private const val MIN_ASPECT          = 0.10f   // was 0.15f — allow tall/narrow boxes
+    private const val MAX_ASPECT          = 8.0f    // was 4.5f — wide horizontal banners
+    private const val MIN_DIM             = 16      // was 22 — catch small bubbles
+    private const val MIN_FILL_RATIO      = 0.25f   // was 0.38f — irregular/complex shapes
+    private const val MIN_INTERIOR_BRIGHT = 100     // was 140 — allow tinted/grayish bubbles
+    private const val MAX_INTERIOR_SAT    = 160     // was 100 — allow yellow/pink/light-green
+    private const val BRIGHT_THRESH       = 120     // was 160 — catch off-white/grayish
+    private const val SAT_THRESH          = 30      // was 55  — catch colored bubbles
+    private const val SAT_BRIGHT          = 35      // was 60  — lower bar for colored
+    private const val MAX_HULL_INPUT      = 200     // unchanged
 
     // ── Dark-bubble tuning ────────────────────────────────────────────────────
-    private const val DARK_THRESH              = 55    // pixels below this = dark candidate
-    private const val MAX_INTERIOR_DARK_BRIGHT = 65    // confirm region is truly dark
-    private const val MIN_BRIGHT_PIXEL_RATIO   = 0.05f // ≥5% bright (text) pixels inside
+    private const val DARK_THRESH              = 70    // was 55 — catch dark-grey boxes too
+    private const val MAX_INTERIOR_DARK_BRIGHT = 80    // was 65 — allow slightly lighter dark bg
+    private const val MIN_BRIGHT_PIXEL_RATIO   = 0.04f // was 0.05f — less strict text-pixel check
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -151,11 +153,16 @@ object BubbleDetector {
             val aspect = bw.toFloat() / bh
             if (aspect < MIN_ASPECT || aspect > MAX_ASPECT) continue
 
-            // ── Filter (b): fill ratio ────────────────────────────────────────
+            // ── Filter (b): edge proximity ───────────────────────────────────
+            // Regions whose bbox touches the working-image edge are panel
+            // borders / gutters, not speech bubbles.
+            if (minX <= 2 || minY <= 2 || maxX >= ww - 3 || maxY >= wh - 3) continue
+
+            // ── Filter (c): fill ratio ────────────────────────────────────────
             val fillRatio = area.toFloat() / (bw * bh)
             if (fillRatio < MIN_FILL_RATIO) continue
 
-            // ── Filters (c) + (d): sample center 50% of bbox ─────────────────
+            // ── Filters (d) + (e): sample center 50% of bbox ─────────────────
             val smX = minX + bw / 4; val emX = (maxX + 1) - bw / 4
             val smY = minY + bh / 4; val emY = (maxY + 1) - bh / 4
             val xStep = maxOf(1, (emX - smX) / 12)
@@ -271,6 +278,9 @@ object BubbleDetector {
             if (dAspect < MIN_ASPECT || dAspect > MAX_ASPECT) continue
             val dFillRatio = dArea.toFloat() / (dbw * dbh)
             if (dFillRatio < MIN_FILL_RATIO) continue
+
+            // Edge proximity: dark panel backgrounds connect to edges and should be skipped
+            if (dMinX <= 2 || dMinY <= 2 || dMaxX >= ww - 3 || dMaxY >= wh - 3) continue
 
             // Sample the WIDER bounding box for bright text pixels + confirm dark interior
             // Use a slightly larger sample region to catch text near edges
