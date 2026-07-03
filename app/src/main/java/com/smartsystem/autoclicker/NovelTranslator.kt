@@ -86,24 +86,26 @@ object NovelTranslator {
     /** Common fantasy/LitRPG/gaming terms that read better left in English (Taglish habit #1). */
     private val FANTASY_GLOSSARY = setOf(
         "magic", "magical", "mana", "mp", "hp", "xp", "exp", "level", "levels", "lvl",
-        "undead", "zombie", "vampire", "demon", "demons", "dungeon", "dungeons", "guild", "guilds",
-        "quest", "quests", "skill", "skills", "skillset", "boss", "bosses", "item", "items",
-        "inventory", "party", "class", "classes", "stat", "stats", "buff", "buffs",
-        "debuff", "debuffs", "cooldown", "tank", "dps", "loot", "spawn", "raid", "npc",
-        "system", "status", "rank", "ranks", "tier", "tiers", "achievement", "achievements",
-        "hunter", "hunters", "gate", "gates", "portal", "portals", "artifact", "artifacts",
+        "undead", "zombie", "vampire", "dungeon", "dungeons", "guild", "guilds",
+        "quest", "quests", "skill", "skills", "skillset", "item", "items",
+        "inventory", "stat", "stats", "buff", "buffs",
+        "debuff", "debuffs", "cooldown", "tank", "dps", "loot", "npc",
+        "portal", "portals", "artifact", "artifacts",
         "relic", "relics", "elemental", "elementals", "summon", "summoner", "summoning",
-        "familiar", "familiars", "aura", "auras", "critical", "crit", "combo", "passive",
-        "active skill", "cast", "casting", "spell", "spells",
+        "familiar spirit", "floor guardian", "floor guardians", "supreme being", "supreme beings",
+        "guild master", "guild members",
         "lich", "liches", "lichdom", "elder lich", "night lich", "overlord", "overlords",
         "sorcerer", "sorcerers", "sorcery", "sorceress", "warrior", "warriors", "knight",
         "knights", "paladin", "paladins", "mage", "mages", "wizard", "wizards", "witch",
         "witches", "elf", "elves", "half-elf", "dwarf", "dwarves", "orc", "orcs", "goblin",
-        "goblins", "titan", "titans", "dragon", "dragons", "familiar spirit", "world class",
-        "domain", "throne", "kingdom", "kingdoms", "empire", "empires", "sanctuary",
-        "guardian", "guardians", "monarch", "monarchs", "beast", "beasts", "monster",
-        "monsters", "grade", "rating", "clan", "clans", "faction", "factions"
+        "goblins", "titan", "titans", "dragon", "dragons",
+        "monster", "monsters", "clan", "clans", "faction", "factions"
     )
+    // NOTE: deliberately excludes common everyday words that also happen to have a
+    // fantasy/game meaning (boss, class, status, system, rank, tier, grade, guardian,
+    // kingdom, empire, aura, familiar, critical, party, hunter, gate, spawn, raid...).
+    // Blanket-protecting those caused ordinary sentences to leak random English words
+    // (e.g. "having the boss on your home turf" is a workplace idiom, not a game boss).
 
     /**
      * Overly-formal / literary / Spanish-rooted Tagalog words that ML Kit's
@@ -235,11 +237,19 @@ object NovelTranslator {
         // 4) Likely proper-noun phrases: one or more consecutive Capitalized words
         //    not at the very start of a sentence (character/place/title names, e.g.
         //    "Night Lich", "Elder Titan Overlord"). Matched as a run so a multi-word
-        //    name never gets half-protected/half-translated.
+        //    name never gets half-protected/half-translated. Uses Unicode letter
+        //    classes (\p{Lu}/\p{L}) rather than plain a-z/A-Z so accented names
+        //    common in fantasy novels (e.g. "Lumièlle") aren't split mid-word.
         val properNounRegex = Regex(
-            """(?<=[a-z,;:’'")\]]\s)([A-Z][a-zA-Z'’-]*(?:\s+[A-Z][a-zA-Z'’-]*)*)"""
+            """(?<=[a-z,;:’'")\]]\s)(\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*)*)"""
         )
-        properNounRegex.findAll(text).forEach { addIfFree(it.range, it.value) }
+        // Skip the English pronoun "I" (and its contractions "I'm"/"I'd"/"I'll"/"I've")
+        // — it's always capitalized regardless of sentence position, so it would
+        // otherwise get misidentified as a proper noun and leak into the output.
+        val pronounIRegex = Regex("""^I(?:['’](?:m|d|ll|ve))?$""")
+        properNounRegex.findAll(text).forEach {
+            if (!pronounIRegex.matches(it.value)) addIfFree(it.range, it.value)
+        }
 
         return spans.sortedBy { it.start }
     }
