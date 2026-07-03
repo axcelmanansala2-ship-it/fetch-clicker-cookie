@@ -19,11 +19,11 @@ data class BubbleInfo(
  *
  * Strategy:
  *  1. Scale to a small working bitmap for speed.
- *  2. Classify each pixel as a "bubble-interior candidate":
+ *  2. Classify each pixel as a "bright bubble-interior candidate":
  *       • Bright (≥ BRIGHT_THRESH)   → white/near-white bubbles
  *       • Saturated non-dark         → colored bubbles (light yellow, pink …)
- *  3. BFS flood-fill from all 4 image edges → marks background.
- *  4. BFS connected-components on remaining enclosed candidates.
+ *  3. BFS flood-fill from all 4 image edges → marks bright background.
+ *  4. BFS connected-components on remaining enclosed bright candidates.
  *     Five filters applied in order:
  *       (a) min/max area, aspect ratio, min dimension
  *       (b) fill ratio    — component_pixels / bbox_area   (action-splatter guard)
@@ -31,10 +31,14 @@ data class BubbleInfo(
  *       (d) interior saturation ≤ 100  — rejects vivid gradient artwork
  *           (speech bubbles are white/low-saturation; cyan/purple gradients fail)
  *  5. Convex hull of boundary pixels → clean, non-self-intersecting outline.
+ *
+ *  DARK BUBBLE PASS (second pass):
+ *  Detects black/dark speech bubbles with white text using the same BFS approach
+ *  but inverted brightness criteria. Confirmed by presence of bright text pixels.
  */
 object BubbleDetector {
 
-    // ── Tuning ────────────────────────────────────────────────────────────────
+    // ── Bright-bubble tuning ───────────────────────────────────────────────────
     private const val WORK_WIDTH          = 360
     private const val MIN_AREA            = 2000
     private const val MAX_AREA_PCT        = 0.50f
@@ -44,11 +48,15 @@ object BubbleDetector {
     private const val MIN_FILL_RATIO      = 0.38f
     private const val MIN_INTERIOR_BRIGHT = 140     // avg brightness of center 50% bbox
     private const val MAX_INTERIOR_SAT    = 100     // avg HSV-sat of center 50% bbox
-                                                     // white=0, light-yellow≈75, cyan≈255
     private const val BRIGHT_THRESH       = 160
     private const val SAT_THRESH          = 55
     private const val SAT_BRIGHT          = 60
     private const val MAX_HULL_INPUT      = 200     // downsample boundary before hull
+
+    // ── Dark-bubble tuning ────────────────────────────────────────────────────
+    private const val DARK_THRESH              = 55    // pixels below this = dark candidate
+    private const val MAX_INTERIOR_DARK_BRIGHT = 65    // confirm region is truly dark
+    private const val MIN_BRIGHT_PIXEL_RATIO   = 0.05f // ≥5% bright (text) pixels inside
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -66,7 +74,7 @@ object BubbleDetector {
         small.recycle()
         val size = ww * wh
 
-        // 2. Classify pixels
+        // 2. Classify pixels — bright candidates
         val isCandidate = BooleanArray(size)
         for (i in pixels.indices) {
             val p = pixels[i]
@@ -96,7 +104,7 @@ object BubbleDetector {
             if (y < wh - 1) enqueue(idx + ww)
         }
 
-        // 4. Connected components
+        // 4. Connected components — bright bubbles
         val visited = BooleanArray(size)
         val maxArea = (size * MAX_AREA_PCT).toInt()
         val invScale = 1f / scale
@@ -186,6 +194,138 @@ object BubbleDetector {
                 ((maxY + 1) * invScale).toInt().coerceAtMost(srcH)
             )
             results.add(BubbleInfo(rect, outline))
+        }
+
+        // ─────────────────────────────────────────────────────────────────────
+        // DARK BUBBLE PASS — black/dark enclosed boxes with white text inside
+        // ─────────────────────────────────────────────────────────────────────
+
+        // Classify dark candidates
+        val isDarkCandidate = BooleanArray(size)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            val r = Color.red(p); val g = Color.green(p); val b = Color.blue(p)
+            val brightness = (r * 0.299f + g * 0.587f + b * 0.114f).toInt()
+            isDarkCandidate[i] = brightness < DARK_THRESH
+        }
+
+        // BFS from edges to mark background dark pixels (open-air dark scene areas)
+        val isDarkBg = BooleanArray(size)
+        val darkQueue = ArrayDeque<Int>(minOf(size / 4, 65536))
+        fun enqueueDark(idx: Int) {
+            if (idx < 0 || idx >= size || isDarkBg[idx] || !isDarkCandidate[idx]) return
+            isDarkBg[idx] = true; darkQueue.addLast(idx)
+        }
+        for (x in 0 until ww) { enqueueDark(x); enqueueDark((wh - 1) * ww + x) }
+        for (y in 0 until wh) { enqueueDark(y * ww); enqueueDark(y * ww + ww - 1) }
+        while (darkQueue.isNotEmpty()) {
+            val idx = darkQueue.removeFirst()
+            val x = idx % ww; val y = idx / ww
+            if (x > 0)      enqueueDark(idx - 1)
+            if (x < ww - 1) enqueueDark(idx + 1)
+            if (y > 0)      enqueueDark(idx - ww)
+            if (y < wh - 1) enqueueDark(idx + ww)
+        }
+
+        // Connected components on enclosed dark regions
+        val darkVisited = BooleanArray(size)
+        for (start in 0 until size) {
+            if (darkVisited[start] || isDarkBg[start] || !isDarkCandidate[start]) continue
+
+            val q3 = ArrayDeque<Int>()
+            q3.addLast(start); darkVisited[start] = true
+
+            var dMinX = ww; var dMaxX = 0; var dMinY = wh; var dMaxY = 0
+            var dArea = 0
+            val dBoundary = mutableListOf<Int>()
+
+            while (q3.isNotEmpty()) {
+                val idx = q3.removeFirst()
+                dArea++
+                val x = idx % ww; val y = idx / ww
+                if (x < dMinX) dMinX = x; if (x > dMaxX) dMaxX = x
+                if (y < dMinY) dMinY = y; if (y > dMaxY) dMaxY = y
+
+                val onBoundary =
+                    x == 0 || x == ww - 1 || y == 0 || y == wh - 1 ||
+                    !isDarkCandidate[idx - 1]  || isDarkBg[idx - 1]  ||
+                    !isDarkCandidate[idx + 1]  || isDarkBg[idx + 1]  ||
+                    !isDarkCandidate[idx - ww] || isDarkBg[idx - ww] ||
+                    !isDarkCandidate[idx + ww] || isDarkBg[idx + ww]
+                if (onBoundary) dBoundary.add(idx)
+
+                fun tryAddD(ni: Int) {
+                    if (ni < 0 || ni >= size || darkVisited[ni] || !isDarkCandidate[ni]) return
+                    darkVisited[ni] = true; q3.addLast(ni)
+                }
+                tryAddD(idx - 1); tryAddD(idx + 1)
+                tryAddD(idx - ww); tryAddD(idx + ww)
+            }
+
+            // Same dimension / area / aspect / fill filters as bright pass
+            if (dArea < MIN_AREA || dArea > maxArea) continue
+            val dbw = (dMaxX - dMinX + 1).coerceAtLeast(1)
+            val dbh = (dMaxY - dMinY + 1).coerceAtLeast(1)
+            if (dbw < MIN_DIM || dbh < MIN_DIM) continue
+            val dAspect = dbw.toFloat() / dbh
+            if (dAspect < MIN_ASPECT || dAspect > MAX_ASPECT) continue
+            val dFillRatio = dArea.toFloat() / (dbw * dbh)
+            if (dFillRatio < MIN_FILL_RATIO) continue
+
+            // Sample the WIDER bounding box for bright text pixels + confirm dark interior
+            // Use a slightly larger sample region to catch text near edges
+            val dSmX = dMinX + dbw / 6; val dEmX = (dMaxX + 1) - dbw / 6
+            val dSmY = dMinY + dbh / 6; val dEmY = (dMaxY + 1) - dbh / 6
+            val dXStep = maxOf(1, (dEmX - dSmX) / 14)
+            val dYStep = maxOf(1, (dEmY - dSmY) / 14)
+            var dBrightPixels = 0; var dDarkSum = 0L; var dSampled = 0
+            var dsy = dSmY
+            while (dsy <= dEmY) {
+                var dsx = dSmX
+                while (dsx <= dEmX) {
+                    val pi = dsy * ww + dsx
+                    if (pi in pixels.indices) {
+                        val p = pixels[pi]
+                        val r = Color.red(p); val g = Color.green(p); val b = Color.blue(p)
+                        val brightness = (r * 0.299f + g * 0.587f + b * 0.114f).toInt()
+                        dDarkSum += brightness
+                        // Bright pixel = text on dark background
+                        if (brightness > 180) dBrightPixels++
+                        dSampled++
+                    }
+                    dsx += dXStep
+                }
+                dsy += dYStep
+            }
+            if (dSampled == 0) continue
+            val dAvgBright = dDarkSum / dSampled
+
+            // Confirm: interior IS dark (not a bright area that snuck in)
+            if (dAvgBright > MAX_INTERIOR_DARK_BRIGHT) continue
+            // Confirm: has white/bright text pixels inside
+            if (dBrightPixels.toFloat() / dSampled < MIN_BRIGHT_PIXEL_RATIO) continue
+
+            // Build result rect in src-bitmap coordinates
+            val darkRect = Rect(
+                (dMinX * invScale).toInt(),
+                (dMinY * invScale).toInt(),
+                ((dMaxX + 1) * invScale).toInt().coerceAtMost(srcW),
+                ((dMaxY + 1) * invScale).toInt().coerceAtMost(srcH)
+            )
+
+            // Skip if this rect is already substantially covered by a detected bright bubble
+            val alreadyCovered = results.any { existing ->
+                val inter = Rect(existing.rect)
+                inter.intersect(darkRect) && run {
+                    val interArea = inter.width().toLong() * inter.height()
+                    val darkArea  = darkRect.width().toLong() * darkRect.height()
+                    interArea > darkArea * 0.6f
+                }
+            }
+            if (alreadyCovered) continue
+
+            val outline = buildConvexHullOutline(dBoundary, ww, invScale)
+            results.add(BubbleInfo(darkRect, outline))
         }
 
         return results.sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
