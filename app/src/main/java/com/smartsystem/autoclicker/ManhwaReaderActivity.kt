@@ -566,13 +566,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val joined  = processedLines.filter { it.isNotBlank() }.joinToString(" ")
         val cleaned = cleanupOcrArtifacts(joined)
 
-        // ── Step 3: Strip remaining lone single letters ───────────────────────────
-        // After all collapsing a leftover "V" or "I" token is never valid speech.
-        val finalTokens = cleaned.split(Regex("\\s+")).filter { token ->
-            token.isNotEmpty() &&
-            !(token.length == 1 && token[0].isLetter())   // drop lone letter tokens
-        }
-        return finalTokens.joinToString(" ").trim()
+        // "I" and "A" are valid English words — collapse steps already merged char runs.
+        return cleaned.trim()
     }
 
     /**
@@ -666,8 +661,9 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      */
     private fun cleanupOcrArtifacts(text: String): String {
         var s = text
-        // Stutter: single letter + hyphen + word (keep the word, drop the stutter)
-        s = s.replace(Regex("""(?i)\b[a-z]-([a-z]{2,})\b"""), "$1")
+        // Stutter: only remove when lone letter REPEATS at start of next word
+        // "f-find"→"find", "a-ahh"→"ahh"  |  "x-ray", "e-mail" left unchanged
+        s = s.replace(Regex("""(?i)\b([a-z])-(\1[a-z]+)\b"""), "$2")
         // Any run of 2+ dots or Unicode ellipsis → nothing
         s = s.replace(Regex("""[.…]{2,}"""), "")
         // Normalise line breaks and excess whitespace
@@ -677,12 +673,17 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * Returns true only when [text] contains at least one real word
-     * (three or more consecutive ASCII letters).
-     * Rejects lone chars, punctuation strings, and short OCR noise from artwork.
+     * Returns true when [text] looks like real speech — not OCR noise from artwork.
+     *
+     * Accepts: "No", "Go", "OK" (2+ letter word), "I am", "Oh no" (2+ tokens)
+     * Rejects: lone single chars, punctuation-only strings, blank text.
      */
-    private fun hasRealContent(text: String): Boolean =
-        text.contains(Regex("[A-Za-z]{3,}"))
+    private fun hasRealContent(text: String): Boolean {
+        if (text.isBlank()) return false
+        if (text.contains(Regex("[A-Za-z]{2,}"))) return true
+        val tokens = text.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        return tokens.size >= 2
+    }
 
     // ── Auto-scroll ───────────────────────────────────────────────────────────
 
