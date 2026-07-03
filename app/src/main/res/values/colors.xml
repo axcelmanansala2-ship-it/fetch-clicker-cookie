@@ -15,6 +15,14 @@
     <color name="colorOverlayStop">#FF5252</color>
     <color name="colorOverlayBg">#CC1B1F3B</color>
     <color name="colorCheckerStart">#FF9800</color>
-    <!-- Manhwa Reader accent — pink/rose -->
-    <color name="colorManhwaAccent">#FF6B9D</color>
+
+    <!-- Novel Reader — deep purple / ink theme -->
+    <color name="colorNovelBg">#0D0F18</color>
+    <color name="colorNovelSurface">#161929</color>
+    <color name="colorNovelAccent">#7C6AF7</color>
+    <color name="colorNovelAccentDark">#5549D3</color>
+    <color name="colorNovelText">#E4E4E8</color>
+    <color name="colorNovelHeading">#BBA9FF</color>
+    <color name="colorNovelMuted">#8888A0</color>
+    <color name="colorNovelHighlight">#1F1A40</color>
 </resources>
