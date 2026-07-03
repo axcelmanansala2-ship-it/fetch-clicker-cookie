@@ -687,16 +687,20 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         // ── Step 1: Interior bimodal brightness check ──────────────────────
         //
-        // Any solid-fill container (bubble or text box) creates a bimodal
-        // brightness distribution:
-        //   White fill + dark letters   → mostly very bright + very dark pixels
+        // Any solid-fill container (bubble or text box, any shape/colour/size)
+        // places text on a SOLID FILL.  That creates a bimodal brightness
+        // distribution inside the bounding box:
+        //
+        //   White fill + dark letters   → most pixels are very bright or very dark
         //   Dark narration fill + white letters → same, inverted
         //   Coloured fill (yellow/pink/blue) → uniform mid-brightness cluster
         //
-        // Artwork / SFX text on artwork has no solid fill → many pixels at
-        // intermediate brightness (skin tones, sky, gradients, colours).
+        // Artwork / SFX with no container: pixels span a continuous range
+        // of intermediate brightness values (skin, sky, clothes, gradients).
         val step = 6
         var total = 0; var extreme = 0
+        val brightVals = mutableListOf<Float>()
+        val darkVals   = mutableListOf<Float>()
         val middleVals = mutableListOf<Float>()
 
         var x = l; while (x <= r) {
@@ -704,91 +708,102 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 Color.colorToHSV(bmp.getPixel(x, y), hsv)
                 val v = hsv[2]
                 total++
-                if (v > 0.82f || v < 0.18f) extreme++
-                else middleVals += v
+                when {
+                    v > 0.82f -> { extreme++; brightVals += v }
+                    v < 0.18f -> { extreme++; darkVals   += v }
+                    else       -> middleVals += v
+                }
                 y += step
             }
             x += step
         }
-
         if (total < 6) return true
 
         val extremeFrac = extreme.toFloat() / total
-
-        // Does the interior look like a solid fill?
         val midMean = if (middleVals.isNotEmpty()) middleVals.average() else 0.0
-        val midVariance = if (middleVals.isNotEmpty())
+        val midVar  = if (middleVals.size >= 2)
             middleVals.sumOf { v -> (v - midMean) * (v - midMean) } / middleVals.size else 1.0
 
         val solidFill = extremeFrac >= 0.72f ||                           // white/dark fill
-            (middleVals.size >= total * 0.30f && midVariance < 0.012)     // coloured fill
+            (middleVals.size >= total * 0.30f && midVar < 0.012)         // coloured fill
 
         if (!solidFill) {
-            // Interior is not solid fill at all — last resort edge check
+            // Interior has no solid fill — fall back to original edge-variance check
             val pad = 10
-            val el = (box.left  - pad).coerceAtLeast(0); val et = (box.top    - pad).coerceAtLeast(0)
-            val er = (box.right + pad).coerceAtMost(bmp.width - 1); val eb = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+            val el = (box.left   - pad).coerceAtLeast(0); val et = (box.top    - pad).coerceAtLeast(0)
+            val er = (box.right  + pad).coerceAtMost(bmp.width  - 1); val eb = (box.bottom + pad).coerceAtMost(bmp.height - 1)
             if (el >= er || et >= eb) return false
-            val edgePx = mutableListOf<Int>(); val es = 10
-            var ex = el; while (ex <= er) { edgePx += bmp.getPixel(ex, et); edgePx += bmp.getPixel(ex, eb); ex += es }
-            var ey = et; while (ey <= eb) { edgePx += bmp.getPixel(el, ey); edgePx += bmp.getPixel(er, ey); ey += es }
-            if (edgePx.size < 4) return false
-            val eVals = edgePx.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
+            val epx = mutableListOf<Int>(); val es = 10
+            var ex = el; while (ex <= er) { epx += bmp.getPixel(ex, et); epx += bmp.getPixel(ex, eb); ex += es }
+            var ey = et; while (ey <= eb) { epx += bmp.getPixel(el, ey); epx += bmp.getPixel(er, ey); ey += es }
+            if (epx.size < 4) return false
+            val eVals = epx.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
             val eM = eVals.average()
             return eVals.sumOf { v -> (v - eM) * (v - eM) } / eVals.size <= 0.04
         }
 
-        // ── Step 2: Background containment check ───────────────────────────
-        //
-        // A real bubble / text box is SURROUNDED BY ARTWORK.
-        // A chapter title, episode header, or full-page label sits on the same
-        // uniform page background in every direction.
-        //
-        // We sample two rings:
-        //   near ring  — just outside the OCR bounding box   (pad = 12 px)
-        //   far  ring  — well beyond the box, into the page  (pad = farPad px)
-        //
-        // Decision:
-        //   |nearMean - farMean| < 0.10  AND  farVariance < 0.020
-        //     → near and far look the same AND far is uniformly coloured
-        //     → the text sits on a flat page background (title/episode page)
-        //     → reject (return false)
-        //
-        //   Otherwise → the text is surrounded by varied artwork → real bubble/box
-        //     → accept (return true)
-        //
-        // Why farVariance matters: on some pages the near and far means could
-        // coincidentally match even for a bubble (e.g., white bubble on white
-        // panel). Requiring that the far ring also be UNIFORM catches the
-        // "same because it's the same background" case while allowing
-        // "same by coincidence in varied artwork" to pass.
-
-        val farPad = ((box.width() + box.height()) / 2).coerceIn(50, bmp.width / 2)
-
-        fun sampleRingBrightness(pad: Int): List<Float> {
-            val fl = (box.left  - pad).coerceAtLeast(0); val ft = (box.top    - pad).coerceAtLeast(0)
-            val fr = (box.right + pad).coerceAtMost(bmp.width - 1); val fb = (box.bottom + pad).coerceAtMost(bmp.height - 1)
-            if (fl >= fr || ft >= fb) return emptyList()
-            val rs = 14; val vals = mutableListOf<Float>()
-            var px = fl; while (px <= fr) { Color.colorToHSV(bmp.getPixel(px, ft), hsv); vals += hsv[2]
-                Color.colorToHSV(bmp.getPixel(px, fb), hsv); vals += hsv[2]; px += rs }
-            var py = ft; while (py <= fb) { Color.colorToHSV(bmp.getPixel(fl, py), hsv); vals += hsv[2]
-                Color.colorToHSV(bmp.getPixel(fr, py), hsv); vals += hsv[2]; py += rs }
-            return vals
+        // Estimate the fill colour (the dominant background in the box, not the text)
+        val fillBrightness: Float = when {
+            brightVals.size > darkVals.size -> brightVals.average().toFloat()   // white/light fill
+            darkVals.isNotEmpty()           -> darkVals.average().toFloat()     // dark fill
+            else                            -> midMean.toFloat()                // coloured fill
         }
 
-        val nearVals = sampleRingBrightness(12)
-        val farVals  = sampleRingBrightness(farPad)
-
-        if (nearVals.size >= 4 && farVals.size >= 4) {
-            val nearMean = nearVals.average()
-            val farMean  = farVals.average()
-            val farVar   = farVals.sumOf { v -> (v - farMean) * (v - farMean) } / farVals.size
-
-            // Near ≈ Far AND far background is uniform → page background, not artwork
-            if (Math.abs(nearMean - farMean) < 0.10 && farVar < 0.020) return false
+        // Shared helper: sample the perimeter of (box ± pad) and return (mean, variance)
+        fun sampleRing(pad: Int): Pair<Float, Float>? {
+            val rl = (box.left   - pad).coerceAtLeast(0); val rt = (box.top    - pad).coerceAtLeast(0)
+            val rr = (box.right  + pad).coerceAtMost(bmp.width  - 1); val rb = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+            if (rl >= rr || rt >= rb) return null
+            val vals = mutableListOf<Float>(); val s = 12
+            var px = rl; while (px <= rr) { Color.colorToHSV(bmp.getPixel(px, rt), hsv); vals += hsv[2]
+                Color.colorToHSV(bmp.getPixel(px, rb), hsv); vals += hsv[2]; px += s }
+            var py = rt; while (py <= rb) { Color.colorToHSV(bmp.getPixel(rl, py), hsv); vals += hsv[2]
+                Color.colorToHSV(bmp.getPixel(rr, py), hsv); vals += hsv[2]; py += s }
+            if (vals.size < 4) return null
+            val m = vals.average().toFloat()
+            return Pair(m, (vals.sumOf { vi -> (vi - m) * (vi - m) } / vals.size).toFloat())
         }
 
+        // ── Step 2a: Boundary detection via near ring ───────────────────────
+        //
+        // If the color just outside the OCR box is SIGNIFICANTLY DIFFERENT from
+        // the interior fill color, a clear boundary exists (bubble edge, box border,
+        // or transition to artwork) → definitely inside a container → accept.
+        //
+        //   Dark narration box in white panel: fill≈0.05, near≈0.90  → Δ=0.85 → accept ✓
+        //   White bubble outline at 12 px    : fill≈0.95, near≈0.10  → Δ=0.85 → accept ✓
+        //   White bubble still inside fill    : fill≈0.95, near≈0.93  → Δ=0.02 → go to 2b
+        val nearRing = sampleRing(12)
+        if (nearRing != null && Math.abs(fillBrightness - nearRing.first) >= 0.15f) return true
+
+        // ── Step 2b: Far-ring uniformity test ─────────────────────────────
+        //
+        // The near ring was ambiguous (still inside the bubble fill, or small box).
+        // Sample a far ring to check whether the background extends uniformly in
+        // all directions (= floating text on a flat page/title background) or
+        // transitions into varied artwork (= bubble surrounded by panel content).
+        //
+        //   Chapter/episode title on flat dark page:
+        //     near≈0.08, far≈0.08, farVar≈0.001 → meanDiff<0.10 & farVar<0.015 → reject ✓
+        //
+        //   White bubble in artwork panel:
+        //     near≈0.93 (still in fill), far≈varied artwork, farVar≈0.04 → NOT rejected ✓
+        //
+        //   White bubble in pure-white flat panel (rare edge case):
+        //     near≈0.93, far≈0.92, farVar≈0.002 → rejected (acceptable miss; very rare) ✗
+        //
+        // farPad: half the box perimeter, minimum 50 px.
+        // Uses coerceAtLeast only (no upper bound) → no crash risk regardless of bitmap size.
+        // The sampleRing() helper clamps all pixel accesses to bitmap bounds.
+        val farPad  = ((box.width() + box.height()) / 2).coerceAtLeast(50)
+        val farRing = sampleRing(farPad)
+
+        if (nearRing != null && farRing != null) {
+            val meanDiff = Math.abs(nearRing.first - farRing.first)
+            if (meanDiff < 0.10f && farRing.second < 0.015f) return false
+        }
+
+        // Inconclusive (e.g. bitmap too small for far ring) → trust the bimodal result
         return true
     }
 
