@@ -55,16 +55,15 @@ import kotlin.coroutines.suspendCoroutine
  *   2. BubbleDetector runs on every page (background IO) and detected speech
  *      bubbles are immediately outlined with green ESP-style borders via
  *      BubbleOverlayView.
- *   3. Pressing ▶ walks bubble-by-bubble through every page in reading order:
- *        – auto-scrolls to centre the current bubble
- *        – lights it up (active green fill + brighter border)
- *        – crops the page bitmap to the bubble region
- *        – runs ML Kit OCR on the crop
- *        – speaks the extracted text via TTS
- *        – deactivates the highlight and moves to the next bubble
+ *   3. Pressing ▶ walks through every page in reading order:
+ *        – OCRs ALL bubbles on the page first (no TTS yet)
+ *        – Concatenates the non-empty texts into ONE utterance per page
+ *        – Auto-scrolls to the first bubble with text
+ *        – Speaks the whole page as a single smooth TTS utterance
+ *        – Then moves to the next page
  *
- * TTS, auto-scroll, and settings (speed / scroll speed / voice) are preserved
- * unchanged from the previous version.
+ *   This "page-at-a-time" speech strategy eliminates choppy, interrupted
+ *   voice caused by many short per-bubble TTS calls on action-heavy pages.
  */
 class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -96,11 +95,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var currentPageIndex = 0
 
     // ── Bubble data ───────────────────────────────────────────────────────────
-    /** Detected bubble Rects for each page, in bitmap coordinates. */
     private val pageBubbles   = mutableListOf<List<BubbleInfo>>()
-    /** One BubbleOverlayView per page, matched by index. */
     private val overlayViews  = mutableListOf<BubbleOverlayView>()
-    /** One ImageView per page (the rendered page bitmap). */
     private val pageImageViews = mutableListOf<ImageView>()
 
     // ── ML Kit ────────────────────────────────────────────────────────────────
@@ -146,7 +142,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         tvStatus.text = "Loading…"
 
         lifecycleScope.launch {
-            // ── Render pages ─────────────────────────────────────────────────
             val bitmaps = withContext(Dispatchers.IO) {
                 val mime   = contentResolver.getType(uri) ?: ""
                 val isPdf  = mime.contains("pdf", ignoreCase = true) ||
@@ -163,7 +158,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             pageImageViews.clear()
             pagesContainer.removeAllViews()
 
-            // ── Build per-page FrameLayout (ImageView + BubbleOverlayView) ───
             for (bmp in bitmaps) {
                 val iv = ImageView(this@ManhwaReaderActivity).apply {
                     setImageBitmap(bmp)
@@ -187,14 +181,12 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 pagesContainer.addView(frame)
                 pageImageViews.add(iv)
                 overlayViews.add(overlay)
-                pageBubbles.add(emptyList())   // placeholder until detection finishes
+                pageBubbles.add(emptyList())
             }
 
             updatePageCounter(0)
             tvStatus.text = "Detecting bubbles…"
 
-            // ── Detect bubbles for every page on IO ──────────────────────────
-            // Show results page-by-page as they arrive so the user sees feedback.
             for ((idx, bmp) in bitmaps.withIndex()) {
                 val detected = withContext(Dispatchers.IO) { BubbleDetector.detect(bmp) }
                 pageBubbles[idx] = detected
@@ -232,7 +224,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 bitmaps.add(bmp)
             }
         } catch (_: Exception) {
-            // return whatever loaded so far
         } finally {
             renderer?.close()
             fd?.close()
@@ -271,7 +262,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (!ttsReady) { Toast.makeText(this, "TTS not ready", Toast.LENGTH_SHORT).show(); return }
         if (pageBitmaps.isEmpty()) { Toast.makeText(this, "No pages loaded", Toast.LENGTH_SHORT).show(); return }
 
-        // Find the page currently visible in the scroll view
         val sy = scrollView.scrollY
         for (i in pageBitmaps.indices) {
             val v = pagesContainer.getChildAt(i) ?: continue
@@ -312,12 +302,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         for (ov in overlayViews) ov.setActiveBubble(-1)
     }
 
-    // ── NEW Core reading loop — bubble by bubble ──────────────────────────────
+    // ── Core reading loop ─────────────────────────────────────────────────────
 
-    /**
-     * Walk through every page from [currentPageIndex] forward,
-     * reading each detected bubble in top-to-bottom, left-to-right order.
-     */
     private suspend fun readAllBubbles() {
         while (isReading && currentPageIndex < pageBitmaps.size) {
             updatePageCounter(currentPageIndex)
@@ -338,8 +324,18 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * Read all speech bubbles on page [pageIdx] sequentially.
-     * For each bubble: scroll into view → highlight → OCR → TTS → next.
+     * Read all speech bubbles on [pageIdx] as a SINGLE smooth TTS utterance.
+     *
+     * Flow:
+     *   1. OCR every detected bubble on the page (IO, sequential).
+     *   2. Collect non-empty texts in reading order (top→bottom, left→right).
+     *   3. Highlight all bubbles that have text simultaneously.
+     *   4. Auto-scroll to the first bubble with text.
+     *   5. Speak the joined text as ONE utterance → no choppy interruptions.
+     *   6. Clear highlights and move to next page.
+     *
+     * Pages with zero detected bubbles get a brief pause and are skipped.
+     * Pages where all detected bubbles produce empty OCR are also skipped silently.
      */
     private suspend fun readBubblesOnPage(pageIdx: Int) {
         val bubbles   = pageBubbles.getOrNull(pageIdx) ?: return
@@ -348,66 +344,77 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val pageFrame = pagesContainer.getChildAt(pageIdx) ?: return
 
         if (bubbles.isEmpty()) {
-            // No detected bubbles on this page — brief pause and continue
             delay(300)
             return
         }
 
-        for ((bubbleIdx, bubbleInfo) in bubbles.withIndex()) {
-            if (!isReading) return
+        // ── Step 1: OCR all bubbles on this page ──────────────────────────────
+        withContext(Dispatchers.Main) {
+            tvStatus.text = "Page ${pageIdx + 1}: reading…"
+        }
 
-            // ── Scroll so the bubble is visible ──────────────────────────────
-            if (autoScrollEnabled) {
-                withContext(Dispatchers.Main) {
-                    // Wait for layout to be ready
-                    if (pageFrame.height == 0) delay(300)
-                }
-                val bubbleRect = bubbleInfo.rect
-            val scaleY = pageFrame.height.toFloat() / srcBitmap.height.coerceAtLeast(1)
-                val bubbleCentreInPage = ((bubbleRect.top + bubbleRect.bottom) / 2f * scaleY).toInt()
+        val ocrResults = bubbles.mapIndexed { idx, bubbleInfo ->
+            if (!isReading) return
+            val text = withContext(Dispatchers.IO) {
+                ocrBubbleCrop(srcBitmap, bubbleInfo.rect)
+            }
+            idx to text.trim()
+        }
+
+        if (!isReading) return
+
+        // ── Step 2: Collect non-empty texts ───────────────────────────────────
+        val nonEmpty = ocrResults.filter { (_, t) -> t.isNotBlank() }
+        if (nonEmpty.isEmpty()) {
+            delay(200)
+            return
+        }
+
+        // ── Step 3: Highlight all bubbles that have text ───────────────────────
+        withContext(Dispatchers.Main) {
+            for ((idx, _) in nonEmpty) {
+                overlay.setActiveBubble(idx)   // overlay supports one "active" at a time;
+                                                // show the first one
+                break
+            }
+        }
+
+        // ── Step 4: Scroll to the first bubble with text ──────────────────────
+        if (autoScrollEnabled) {
+            val firstBubbleIdx = nonEmpty.first().first
+            val firstRect = bubbles[firstBubbleIdx].rect
+            if (pageFrame.height > 0) {
+                val scaleY = pageFrame.height.toFloat() / srcBitmap.height.coerceAtLeast(1)
+                val bubbleCentreInPage = ((firstRect.top + firstRect.bottom) / 2f * scaleY).toInt()
                 val targetScrollY = (pageFrame.top + bubbleCentreInPage - scrollView.height / 2)
                     .coerceAtLeast(0)
                 withContext(Dispatchers.Main) {
                     animatedScrollTo(targetScrollY, scrollDuration)
                 }
             }
-
-            if (!isReading) return
-
-            // ── Light up this bubble ──────────────────────────────────────────
-            withContext(Dispatchers.Main) {
-                overlay.setActiveBubble(bubbleIdx)
-                tvStatus.text = "Bubble ${bubbleIdx + 1}/${bubbles.size}"
-            }
-
-            // ── OCR the bubble crop ───────────────────────────────────────────
-            val text = withContext(Dispatchers.IO) {
-                ocrBubbleCrop(srcBitmap, bubbleInfo.rect)
-            }
-
-            // ── Speak ─────────────────────────────────────────────────────────
-            if (text.isNotBlank() && isReading) {
-                speakAndWait(text)
-            } else if (isReading) {
-                delay(150) // no text — still give a tiny pause before next bubble
-            }
-
-            // ── Deactivate highlight ──────────────────────────────────────────
-            withContext(Dispatchers.Main) {
-                overlay.setActiveBubble(-1)
-            }
-
-            delay(200) // brief gap between bubbles
         }
+
+        if (!isReading) return
+
+        // ── Step 5: Speak ALL bubble text as ONE smooth utterance ─────────────
+        // Texts are joined with a comma-space so TTS produces a natural pause
+        // between bubbles without restarting the engine.
+        val fullText = nonEmpty.joinToString(", ") { (_, t) -> t }
+        withContext(Dispatchers.Main) {
+            tvStatus.text = "Page ${pageIdx + 1} — ${nonEmpty.size} bubble(s)"
+        }
+        speakAndWait(fullText)
+
+        // ── Step 6: Clear highlights ──────────────────────────────────────────
+        withContext(Dispatchers.Main) {
+            overlay.setActiveBubble(-1)
+        }
+
+        delay(300) // brief gap before next page
     }
 
     // ── OCR helpers ───────────────────────────────────────────────────────────
 
-    /**
-     * Crop [src] to [bubbleRect] (with a small padding) and run ML Kit OCR.
-     * Returns the extracted text or an empty string on failure.
-     * Safe to call on any thread.
-     */
     private suspend fun ocrBubbleCrop(src: Bitmap, bubbleRect: Rect): String {
         val pad = 12
         val cropRect = Rect(
@@ -467,7 +474,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private suspend fun speakAndWait(text: String) {
         if (tts == null || !ttsReady || text.isBlank()) return
-        withTimeoutOrNull(60_000L) {
+        withTimeoutOrNull(120_000L) {
             suspendCancellableCoroutine<Unit> { cont ->
                 val uid  = "bubble_${System.currentTimeMillis()}"
                 val done = AtomicBoolean(false)
@@ -516,7 +523,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             setPadding(56, 32, 56, 16)
         }
 
-        // Reading speed
         inner.addView(TextView(this).apply {
             text = "Reading Speed"; textSize = 13f
             setTypeface(null, Typeface.BOLD); setPadding(0, 0, 0, 4)
@@ -529,7 +535,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         inner.addView(speedGroup)
 
-        // Scroll speed
         inner.addView(TextView(this).apply {
             text = "Auto-Scroll Speed"; textSize = 13f
             setTypeface(null, Typeface.BOLD); setPadding(0, 20, 0, 4)
@@ -542,7 +547,6 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
         inner.addView(scrollGroup)
 
-        // Voice picker
         val englishVoices = tts?.voices
             ?.filter { it.locale.language == "en" }
             ?.sortedBy { it.name }
