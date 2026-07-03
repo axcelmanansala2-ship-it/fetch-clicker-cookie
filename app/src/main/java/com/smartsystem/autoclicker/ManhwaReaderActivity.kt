@@ -496,6 +496,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             // bubble → read it. High variance → on artwork → skip it. No word-lists.
             val allLines = blocks
                 .filter { block -> block.blockBox == null || isInsideBubble(slice, block.blockBox) }
+                .filter { block -> !looksLikeSfxText(block.lines, block.blockBox) }
                 .flatMap { it.lines }
                 .filter { it.isNotBlank() }
                 .toMutableList()
@@ -676,34 +677,66 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun isInsideBubble(bmp: Bitmap, box: Rect): Boolean {
         if (box.isEmpty) return true
 
-        // Expand slightly beyond the text boundary to sample the actual
-        // background rather than the letter pixels themselves.
-        val pad = 10
-        val l = (box.left   - pad).coerceAtLeast(0)
-        val t = (box.top    - pad).coerceAtLeast(0)
-        val r = (box.right  + pad).coerceAtMost(bmp.width  - 1)
-        val b = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+        // Two-ring sampling to defeat the SFX halo problem:
+        //   SFX text (SNEAK, SWIPE, TAP…) is rendered with a white glow/outline
+        //   around the letters. The 10 px inner ring catches that uniform halo and
+        //   falsely reports low variance → "inside bubble". Moving to a wider outer
+        //   ring at 28 px reaches the actual illustrated artwork behind the glow,
+        //   which has high colour variance → correctly rejected.
+        //   Real speech bubbles extend far beyond the text; both rings land inside
+        //   the flat-coloured bubble fill and both show low variance → accepted.
+        //
+        // Rule: a block is inside a bubble only if BOTH rings are low-variance.
 
-        if (l >= r || t >= b) return true   // degenerate box — give benefit of doubt
+        fun sampleEdgeVariance(pad: Int): Double {
+            val l = (box.left   - pad).coerceAtLeast(0)
+            val t = (box.top    - pad).coerceAtLeast(0)
+            val r = (box.right  + pad).coerceAtMost(bmp.width  - 1)
+            val b = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+            if (l >= r || t >= b) return 0.0  // degenerate — treat as bubble
 
-        // Sample pixels evenly along the four expanded edges.
-        val samples = mutableListOf<Int>()
-        val step = 10   // px between consecutive samples
-        var x = l; while (x <= r) { samples += bmp.getPixel(x, t); samples += bmp.getPixel(x, b); x += step }
-        var y = t; while (y <= b) { samples += bmp.getPixel(l, y); samples += bmp.getPixel(r, y); y += step }
+            val samples = mutableListOf<Int>()
+            val step = 8
+            var x = l; while (x <= r) { samples += bmp.getPixel(x, t); samples += bmp.getPixel(x, b); x += step }
+            var y = t; while (y <= b) { samples += bmp.getPixel(l, y); samples += bmp.getPixel(r, y); y += step }
+            if (samples.size < 4) return 0.0
 
-        if (samples.size < 4) return true   // too few samples — assume bubble
+            val hsv = FloatArray(3)
+            val vals = samples.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
+            val mean = vals.average()
+            return vals.sumOf { v -> (v - mean) * (v - mean) } / vals.size
+        }
 
-        // Measure brightness variance (HSV Value channel: 0 = black, 1 = white).
-        val hsv = FloatArray(3)
-        val vals = samples.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
-        val mean = vals.average()
-        val variance = vals.sumOf { v -> (v - mean) * (v - mean) } / vals.size
+        // Inner ring: 10 px — captures the immediate background just outside letters.
+        // Threshold 0.04 is relaxed enough to handle gradient or shadow bubble fills.
+        val innerVar = sampleEdgeVariance(10)
+        if (innerVar > 0.04) return false
 
-        // Empirical threshold: bubble backgrounds are nearly solid colour (variance
-        // ≈ 0–0.02). Textured artwork has high variation (variance ≫ 0.05). 0.04
-        // leaves comfortable margin for drop shadows and colour-gradient bubble fills.
-        return variance <= 0.04
+        // Outer ring: 28 px — reaches past any SFX halo/glow into the real background.
+        // Tighter threshold 0.03 because genuine bubble backgrounds this far out are
+        // even more uniform than the edge near the text.
+        val outerVar = sampleEdgeVariance(28)
+        return outerVar <= 0.03
+    }
+
+    // SFX / sound-effect guard — second line of defence after the variance check.
+    //
+    // Manhwa sound effects (SNEAK, SWIPE, BANG, TAP …) are drawn as very large,
+    // spread-out letters directly on the artwork. Their bounding box area per
+    // character is dramatically higher than compact dialogue text inside bubbles:
+    //
+    //   "SNEAK" as SFX  : ~400 × 150 px = 60 000 px²  /  5 chars = 12 000 px²/char
+    //   "Wait a minute.": ~350 × 80  px = 28 000 px²  / 14 chars =  2 000 px²/char
+    //   "NO..."          : ~120 × 60  px =  7 200 px²  /  5 chars =  1 440 px²/char
+    //
+    // Threshold 5 000 px²/char captures SFX while safely passing all normal dialogue,
+    // including very short exclamations ("YES!", "STOP!") in small bubbles.
+    private fun looksLikeSfxText(lines: List<String>, box: Rect?): Boolean {
+        if (box == null || box.isEmpty) return false
+        val text = lines.joinToString(" ")
+        val charCount = text.count { it.isLetterOrDigit() }.coerceAtLeast(1)
+        val area = box.width().toLong() * box.height().toLong()
+        return (area / charCount) > 5_000
     }
 
     // Garbled "censor scream" text: comics often represent unintelligible
