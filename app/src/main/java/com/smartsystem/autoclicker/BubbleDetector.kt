@@ -4,16 +4,14 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PointF
 import android.graphics.Rect
-import kotlin.math.atan2
 
 /**
- * Detected speech bubble: bounding rectangle + an ordered outline polygon
- * (boundary pixels sorted by angle from centroid, in source-bitmap coordinates).
- * The outline is used to draw a fluid ESP border that matches the bubble's shape.
+ * Detected speech bubble: bounding rectangle + convex-hull outline polygon
+ * in source-bitmap coordinates. The outline is used to draw an ESP border.
  */
 data class BubbleInfo(
     val rect: Rect,
-    val outline: List<PointF>   // clockwise, source-bitmap coordinates
+    val outline: List<PointF>   // convex hull, source-bitmap coordinates
 )
 
 /**
@@ -22,33 +20,35 @@ data class BubbleInfo(
  * Strategy:
  *  1. Scale to a small working bitmap for speed.
  *  2. Classify each pixel as a "bubble-interior candidate":
- *       • Bright (≥ BRIGHT_THRESH)      → white/near-white bubbles
- *       • Saturated non-dark            → colored bubbles (red, yellow …)
- *  3. BFS flood-fill from all 4 image edges to mark the background.
+ *       • Bright (≥ BRIGHT_THRESH)   → white/near-white bubbles
+ *       • Saturated non-dark         → colored bubbles (light yellow, pink …)
+ *  3. BFS flood-fill from all 4 image edges → marks background.
  *  4. BFS connected-components on remaining enclosed candidates.
- *     Filters applied:
- *       – min/max area, aspect ratio
- *       – fill ratio  = component_pixels / bounding_box_area  (action-splatter guard)
- *       – interior brightness = average brightness of center 50 % of bbox
- *         (dark action-artwork panels have low brightness even when "enclosed")
- *  5. For each passing component, collect its boundary pixels, sort by angle
- *     from centroid (ordered outline polygon), downsample, scale to source coords.
+ *     Five filters applied in order:
+ *       (a) min/max area, aspect ratio, min dimension
+ *       (b) fill ratio    — component_pixels / bbox_area   (action-splatter guard)
+ *       (c) interior brightness ≥ 140  — rejects dark action panels
+ *       (d) interior saturation ≤ 100  — rejects vivid gradient artwork
+ *           (speech bubbles are white/low-saturation; cyan/purple gradients fail)
+ *  5. Convex hull of boundary pixels → clean, non-self-intersecting outline.
  */
 object BubbleDetector {
 
     // ── Tuning ────────────────────────────────────────────────────────────────
-    private const val WORK_WIDTH             = 360
-    private const val MIN_AREA               = 2000          // pixels at work scale
-    private const val MAX_AREA_PCT           = 0.50f
-    private const val MIN_ASPECT             = 0.15f
-    private const val MAX_ASPECT             = 4.5f
-    private const val MIN_DIM                = 22            // min bounding-box side (work scale)
-    private const val MIN_FILL_RATIO         = 0.38f         // solid fill guard (raised from 0.22)
-    private const val MIN_INTERIOR_BRIGHT    = 140           // avg brightness of center bbox area
-    private const val BRIGHT_THRESH          = 160
-    private const val SAT_THRESH             = 55
-    private const val SAT_BRIGHT             = 60
-    private const val MAX_OUTLINE_PTS        = 48
+    private const val WORK_WIDTH          = 360
+    private const val MIN_AREA            = 2000
+    private const val MAX_AREA_PCT        = 0.50f
+    private const val MIN_ASPECT          = 0.15f
+    private const val MAX_ASPECT          = 4.5f
+    private const val MIN_DIM             = 22
+    private const val MIN_FILL_RATIO      = 0.38f
+    private const val MIN_INTERIOR_BRIGHT = 140     // avg brightness of center 50% bbox
+    private const val MAX_INTERIOR_SAT    = 100     // avg HSV-sat of center 50% bbox
+                                                     // white=0, light-yellow≈75, cyan≈255
+    private const val BRIGHT_THRESH       = 160
+    private const val SAT_THRESH          = 55
+    private const val SAT_BRIGHT          = 60
+    private const val MAX_HULL_INPUT      = 200     // downsample boundary before hull
 
     // ── Public API ────────────────────────────────────────────────────────────
 
@@ -96,11 +96,11 @@ object BubbleDetector {
             if (y < wh - 1) enqueue(idx + ww)
         }
 
-        // 4. Connected components of enclosed candidates
-        val visited  = BooleanArray(size)
-        val maxArea  = (size * MAX_AREA_PCT).toInt()
+        // 4. Connected components
+        val visited = BooleanArray(size)
+        val maxArea = (size * MAX_AREA_PCT).toInt()
         val invScale = 1f / scale
-        val results  = mutableListOf<BubbleInfo>()
+        val results = mutableListOf<BubbleInfo>()
 
         for (start in 0 until size) {
             if (visited[start] || isBg[start] || !isCandidate[start]) continue
@@ -135,51 +135,50 @@ object BubbleDetector {
                 tryAdd(idx - ww); tryAdd(idx + ww)
             }
 
-            // ── Filter 1: area ────────────────────────────────────────────────
+            // ── Filter (a): area / dimension ──────────────────────────────────
             if (area < MIN_AREA || area > maxArea) continue
-            // +1 for inclusive → exclusive bbox (matches Android Rect convention)
             val bw = (maxX - minX + 1).coerceAtLeast(1)
             val bh = (maxY - minY + 1).coerceAtLeast(1)
             if (bw < MIN_DIM || bh < MIN_DIM) continue
-
-            // ── Filter 2: aspect ratio ────────────────────────────────────────
             val aspect = bw.toFloat() / bh
             if (aspect < MIN_ASPECT || aspect > MAX_ASPECT) continue
 
-            // ── Filter 3: fill ratio (action splatter / SFX guard) ────────────
+            // ── Filter (b): fill ratio ────────────────────────────────────────
             val fillRatio = area.toFloat() / (bw * bh)
             if (fillRatio < MIN_FILL_RATIO) continue
 
-            // ── Filter 4: interior brightness (dark-page false-positive guard) ─
-            // Sample the center 50% of the bounding box. Real speech bubbles are
-            // bright white inside; dark action panels fail even if "enclosed".
+            // ── Filters (c) + (d): sample center 50% of bbox ─────────────────
             val smX = minX + bw / 4; val emX = (maxX + 1) - bw / 4
             val smY = minY + bh / 4; val emY = (maxY + 1) - bh / 4
             val xStep = maxOf(1, (emX - smX) / 12)
             val yStep = maxOf(1, (emY - smY) / 12)
-            var brightSum = 0L; var sampleCount = 0
+            var brightSum = 0L; var satSum = 0L; var sampleCount = 0
             var sy = smY
             while (sy <= emY) {
                 var sx = smX
                 while (sx <= emX) {
                     val pi = sy * ww + sx
                     if (pi in pixels.indices) {
-                        val p = pixels[pi]
-                        val r = Color.red(p); val g = Color.green(p); val b = Color.blue(p)
-                        brightSum += (r * 0.299f + g * 0.587f + b * 0.114f).toInt()
+                        val p  = pixels[pi]
+                        val r  = Color.red(p); val g = Color.green(p); val b = Color.blue(p)
+                        brightSum += (r * 0.299f + g * 0.587f + b * 0.114f).toLong()
+                        val mx = maxOf(r, g, b); val mn = minOf(r, g, b)
+                        satSum += if (mx == 0) 0 else ((mx - mn) * 255 / mx).toLong()
                         sampleCount++
                     }
                     sx += xStep
                 }
                 sy += yStep
             }
-            val avgBright = if (sampleCount > 0) brightSum / sampleCount else 0L
-            if (avgBright < MIN_INTERIOR_BRIGHT) continue   // dark artwork panel
+            if (sampleCount == 0) continue
+            val avgBright = brightSum / sampleCount
+            val avgSat    = satSum    / sampleCount
+            if (avgBright < MIN_INTERIOR_BRIGHT) continue   // dark action panel
+            if (avgSat    > MAX_INTERIOR_SAT)    continue   // vivid gradient/artwork
 
-            // ── Build outline from boundary pixels sorted by angle ─────────────
-            val outline = buildOutline(boundaryPx, ww, invScale)
+            // ── Step 5: convex hull of downsampled boundary pixels ─────────────
+            val outline = buildConvexHullOutline(boundaryPx, ww, invScale)
 
-            // right/bottom are exclusive (Android Rect convention): use max+1
             val rect = Rect(
                 (minX * invScale).toInt(),
                 (minY * invScale).toInt(),
@@ -192,27 +191,55 @@ object BubbleDetector {
         return results.sortedWith(compareBy({ it.rect.top }, { it.rect.left }))
     }
 
-    // ── Outline building ──────────────────────────────────────────────────────
+    // ── Convex-hull outline ───────────────────────────────────────────────────
 
-    private fun buildOutline(boundaryPx: List<Int>, ww: Int, invScale: Float): List<PointF> {
+    /**
+     * Downsample boundary pixels, compute their convex hull in source coords.
+     * Result: a clean, non-self-intersecting polygon that tightly wraps the bubble.
+     */
+    private fun buildConvexHullOutline(boundaryPx: List<Int>, ww: Int, invScale: Float): List<PointF> {
         if (boundaryPx.isEmpty()) return emptyList()
-        var sumX = 0L; var sumY = 0L
-        for (idx in boundaryPx) { sumX += idx % ww; sumY += idx / ww }
-        val cx = sumX.toFloat() / boundaryPx.size
-        val cy = sumY.toFloat() / boundaryPx.size
 
-        val sorted = boundaryPx.sortedBy { idx ->
-            atan2(((idx / ww) - cy).toDouble(), ((idx % ww) - cx).toDouble()).toFloat()
-        }
-
-        val step = maxOf(1, sorted.size / MAX_OUTLINE_PTS)
-        val outline = mutableListOf<PointF>()
+        // Downsample so hull input is manageable
+        val step = maxOf(1, boundaryPx.size / MAX_HULL_INPUT)
+        val pts  = mutableListOf<PointF>()
         var i = 0
-        while (i < sorted.size) {
-            val idx = sorted[i]
-            outline.add(PointF((idx % ww) * invScale, (idx / ww) * invScale))
+        while (i < boundaryPx.size) {
+            val idx = boundaryPx[i]
+            pts.add(PointF((idx % ww) * invScale, (idx / ww) * invScale))
             i += step
         }
-        return outline
+
+        return convexHull(pts)
     }
+
+    /**
+     * Andrew's monotone chain algorithm — O(n log n).
+     * Returns points in counter-clockwise order.
+     */
+    private fun convexHull(pts: List<PointF>): List<PointF> {
+        if (pts.size <= 2) return pts
+        val sorted = pts.sortedWith(compareBy({ it.x }, { it.y }))
+        val hull = mutableListOf<PointF>()
+
+        // Lower hull
+        for (p in sorted) {
+            while (hull.size >= 2 && cross(hull[hull.size - 2], hull[hull.size - 1], p) <= 0f)
+                hull.removeAt(hull.size - 1)
+            hull.add(p)
+        }
+        // Upper hull
+        val lowerSize = hull.size + 1
+        for (p in sorted.reversed()) {
+            while (hull.size >= lowerSize && cross(hull[hull.size - 2], hull[hull.size - 1], p) <= 0f)
+                hull.removeAt(hull.size - 1)
+            hull.add(p)
+        }
+        hull.removeAt(hull.size - 1)   // last == first
+        return hull
+    }
+
+    /** 2-D cross product of vectors OA and OB. Positive = left turn. */
+    private fun cross(o: PointF, a: PointF, b: PointF): Float =
+        (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
 }
