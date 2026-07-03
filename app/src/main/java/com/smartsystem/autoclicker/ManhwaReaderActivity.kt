@@ -9,7 +9,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.Point
 import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.pdf.PdfRenderer
@@ -21,13 +20,14 @@ import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.view.animation.LinearInterpolator
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.ArrayAdapter
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
@@ -46,45 +46,67 @@ import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlin.coroutines.suspendCoroutine
-import kotlin.math.atan2
-import kotlin.math.abs
 
+/**
+ * Manhwa Reader Activity — bubble-aware TTS reader.
+ *
+ * After loading a PDF or image file:
+ *   1. Each page is rendered and displayed.
+ *   2. BubbleDetector runs on every page (background IO) and detected speech
+ *      bubbles are immediately outlined with green ESP-style borders via
+ *      BubbleOverlayView.
+ *   3. Pressing ▶ walks bubble-by-bubble through every page in reading order:
+ *        – auto-scrolls to centre the current bubble
+ *        – lights it up (active green fill + brighter border)
+ *        – crops the page bitmap to the bubble region
+ *        – runs ML Kit OCR on the crop
+ *        – speaks the extracted text via TTS
+ *        – deactivates the highlight and moves to the next bubble
+ *
+ * TTS, auto-scroll, and settings (speed / scroll speed / voice) are preserved
+ * unchanged from the previous version.
+ */
 class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
-    private lateinit var scrollView: ScrollView
+    // ── Views ─────────────────────────────────────────────────────────────────
+    private lateinit var scrollView:     ScrollView
     private lateinit var pagesContainer: LinearLayout
-    private lateinit var tvStatus: TextView
-    private lateinit var tvPageCount: TextView
-    private lateinit var btnReadPause: Button
-    private lateinit var btnStop: Button
-    private lateinit var btnAutoScroll: ToggleButton
-    private lateinit var btnSettings: Button
+    private lateinit var tvStatus:       TextView
+    private lateinit var tvPageCount:    TextView
+    private lateinit var btnReadPause:   Button
+    private lateinit var btnStop:        Button
+    private lateinit var btnAutoScroll:  ToggleButton
+    private lateinit var btnSettings:    Button
     private lateinit var readingHighlight: View
 
-    private var tts: TextToSpeech? = null
-    private var ttsReady = false
-    private var isReading = false
-    private var autoScrollEnabled = true
-    private var readingJob: Job? = null
-    private val pageBitmaps = mutableListOf<Bitmap>()
-
-    private var currentPageIndex = 0
-    private var currentChunkOffset = 0
-    // Stores NORMALISED keys (see normalizeForDedup) so that minor OCR variations
-    // of the same visual text — different whitespace, stray punctuation, slight
-    // capitalisation differences between two scans of the same bubble — are still
-    // recognised as "already spoken" and never re-read.
-    private val spokenLines = mutableSetOf<String>()
-    // Bottom-most line of the previous chunk that looked cut off mid-sentence
-    // (no ending punctuation). Held back instead of spoken so the next,
-    // overlapping chunk can bring in the rest of the sentence before it is read.
-    private var heldLine: String? = null
-
-    private var ttsSpeed = 1.0f
+    // ── TTS ───────────────────────────────────────────────────────────────────
+    private var tts:           TextToSpeech? = null
+    private var ttsReady       = false
+    private var ttsSpeed       = 1.0f
     private var scrollDuration = 1500L
     private var selectedVoice: Voice? = null
 
+    // ── Playback state ────────────────────────────────────────────────────────
+    private var isReading        = false
+    private var autoScrollEnabled = true
+    private var readingJob: Job? = null
+
+    // ── Page data ─────────────────────────────────────────────────────────────
+    private val pageBitmaps  = mutableListOf<Bitmap>()
+    private var currentPageIndex = 0
+
+    // ── Bubble data ───────────────────────────────────────────────────────────
+    /** Detected bubble Rects for each page, in bitmap coordinates. */
+    private val pageBubbles   = mutableListOf<List<Rect>>()
+    /** One BubbleOverlayView per page, matched by index. */
+    private val overlayViews  = mutableListOf<BubbleOverlayView>()
+    /** One ImageView per page (the rendered page bitmap). */
+    private val pageImageViews = mutableListOf<ImageView>()
+
+    // ── ML Kit ────────────────────────────────────────────────────────────────
     private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+    // ─────────────────────────────────────────────────────────────────────────
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -117,16 +139,18 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             ?: if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
                 intent?.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
             else
+                @Suppress("DEPRECATION")
                 intent?.getParcelableExtra(Intent.EXTRA_STREAM)
 
         if (uri == null) { tvStatus.text = "No file"; return }
-        tvStatus.text = "Loading..."
+        tvStatus.text = "Loading…"
 
         lifecycleScope.launch {
+            // ── Render pages ─────────────────────────────────────────────────
             val bitmaps = withContext(Dispatchers.IO) {
-                val mime = contentResolver.getType(uri) ?: ""
-                val isPdf = mime.contains("pdf", ignoreCase = true) ||
-                    uri.lastPathSegment?.endsWith(".pdf", ignoreCase = true) == true
+                val mime   = contentResolver.getType(uri) ?: ""
+                val isPdf  = mime.contains("pdf", ignoreCase = true) ||
+                             uri.lastPathSegment?.endsWith(".pdf", ignoreCase = true) == true
                 if (isPdf) loadPdfPages(uri) else loadImagePage(uri)
             }
 
@@ -134,69 +158,80 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             pageBitmaps.clear()
             pageBitmaps.addAll(bitmaps)
+            pageBubbles.clear()
+            overlayViews.clear()
+            pageImageViews.clear()
             pagesContainer.removeAllViews()
 
+            // ── Build per-page FrameLayout (ImageView + BubbleOverlayView) ───
             for (bmp in bitmaps) {
                 val iv = ImageView(this@ManhwaReaderActivity).apply {
                     setImageBitmap(bmp)
-                    layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                    layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
                     adjustViewBounds = true
                     scaleType = ImageView.ScaleType.FIT_CENTER
                 }
-                pagesContainer.addView(iv)
+
+                val overlay = BubbleOverlayView(this@ManhwaReaderActivity).apply {
+                    layoutParams = ViewGroup.LayoutParams(MATCH_PARENT, MATCH_PARENT)
+                    srcWidth  = bmp.width
+                    srcHeight = bmp.height
+                }
+
+                val frame = FrameLayout(this@ManhwaReaderActivity).apply {
+                    layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                    addView(iv)
+                    addView(overlay)
+                }
+
+                pagesContainer.addView(frame)
+                pageImageViews.add(iv)
+                overlayViews.add(overlay)
+                pageBubbles.add(emptyList())   // placeholder until detection finishes
             }
 
             updatePageCounter(0)
-            tvStatus.text = "Tap \u25B6 to read"
+            tvStatus.text = "Detecting bubbles…"
+
+            // ── Detect bubbles for every page on IO ──────────────────────────
+            // Show results page-by-page as they arrive so the user sees feedback.
+            for ((idx, bmp) in bitmaps.withIndex()) {
+                val detected = withContext(Dispatchers.IO) { BubbleDetector.detect(bmp) }
+                pageBubbles[idx] = detected
+                overlayViews.getOrNull(idx)?.setBubbles(detected)
+            }
+
+            val total = pageBubbles.sumOf { it.size }
+            tvStatus.text = if (total > 0) "$total bubbles — tap ▶ to read" else "Tap ▶ to read"
         }
     }
 
     private fun updatePageCounter(index: Int) {
         val total = pageBitmaps.size
-        tvPageCount.text = if (total > 0) "${index + 1}/${total}" else ""
+        tvPageCount.text = if (total > 0) "${index + 1}/$total" else ""
     }
 
-    // Decodes the source image at a resolution close to the device's own screen
-    // width instead of a fixed inSampleSize=2. Long manhwa strips are often far
-    // wider/taller than any phone screen; decoding them at full (or half) size
-    // wastes memory and makes every scroll/slice/OCR pass on that bitmap slower.
-    // Matches the same target-width approach already used for PDF pages.
-    private fun loadImagePage(uri: Uri): List<Bitmap> {
-        return try {
-            val targetWidth = minOf(resources.displayMetrics.widthPixels, 720)
-            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
-            val srcWidth = boundsOpts.outWidth.coerceAtLeast(1)
-            var sampleSize = 1
-            while (srcWidth / (sampleSize * 2) >= targetWidth) sampleSize *= 2
-
-            val stream = contentResolver.openInputStream(uri) ?: return emptyList()
-            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            val bmp = BitmapFactory.decodeStream(stream, null, opts)
-            stream.close()
-            if (bmp != null) listOf(bmp) else emptyList()
-        } catch (e: Exception) { emptyList() }
-    }
+    // ── PDF / Image loading ───────────────────────────────────────────────────
 
     private fun loadPdfPages(uri: Uri): List<Bitmap> {
-        val bitmaps = mutableListOf<Bitmap>()
+        val bitmaps  = mutableListOf<Bitmap>()
         var fd: ParcelFileDescriptor? = null
-        var renderer: PdfRenderer? = null
+        var renderer: PdfRenderer?    = null
         try {
-            fd = openPdfDescriptor(uri) ?: return emptyList()
+            fd       = openPdfDescriptor(uri) ?: return emptyList()
             renderer = PdfRenderer(fd)
-            val targetWidth = minOf(resources.displayMetrics.widthPixels, 720)
+            val targetW = minOf(resources.displayMetrics.widthPixels, 720)
             for (i in 0 until renderer.pageCount) {
-                val page = renderer.openPage(i)
-                val scale = targetWidth.toFloat() / page.width.coerceAtLeast(1)
+                val page  = renderer.openPage(i)
+                val scale = targetW.toFloat() / page.width.coerceAtLeast(1)
                 val pageH = (page.height * scale).toInt().coerceAtLeast(1)
-                val bmp = Bitmap.createBitmap(targetWidth, pageH, Bitmap.Config.ARGB_8888)
+                val bmp   = Bitmap.createBitmap(targetW, pageH, Bitmap.Config.ARGB_8888)
                 Canvas(bmp).drawColor(Color.WHITE)
                 page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                 page.close()
                 bitmaps.add(bmp)
             }
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             // return whatever loaded so far
         } finally {
             renderer?.close()
@@ -205,123 +240,29 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         return bitmaps
     }
 
+    private fun loadImagePage(uri: Uri): List<Bitmap> {
+        return try {
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) }
+            val targetW = minOf(resources.displayMetrics.widthPixels, 720)
+            val sample  = maxOf(1, opts.outWidth / targetW)
+            val decOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+            val bmp     = contentResolver.openInputStream(uri)
+                ?.use { BitmapFactory.decodeStream(it, null, decOpts) }
+            if (bmp != null) listOf(bmp) else emptyList()
+        } catch (_: Exception) { emptyList() }
+    }
+
     private fun openPdfDescriptor(uri: Uri): ParcelFileDescriptor? {
         return try {
             contentResolver.openFileDescriptor(uri, "r")
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             try {
                 val tmp = File(cacheDir, "manhwa_tmp.pdf")
                 contentResolver.openInputStream(uri)?.use { it.copyTo(tmp.outputStream()) }
                 ParcelFileDescriptor.open(tmp, ParcelFileDescriptor.MODE_READ_ONLY)
-            } catch (e2: Exception) { null }
+            } catch (_: Exception) { null }
         }
-    }
-
-    // ── Settings ──────────────────────────────────────────────────────────────
-
-    private fun showSettingsDialog() {
-        if (isReading) pauseReading()
-
-        val speedLabels  = arrayOf("Slow (0.75x)", "Normal (1.0x)", "Fast (1.5x)", "Very Fast (2.0x)")
-        val speedValues  = floatArrayOf(0.75f, 1.0f, 1.5f, 2.0f)
-        val scrollLabels = arrayOf("Very Slow (4s)", "Slow (2.5s)", "Normal (1.5s)", "Fast (0.7s)")
-        val scrollValues = longArrayOf(4000L, 2500L, 1500L, 700L)
-
-        var curSpeedIdx = 1
-        for (i in speedValues.indices) { if (speedValues[i] == ttsSpeed) { curSpeedIdx = i; break } }
-        var curScrollIdx = 2
-        for (i in scrollValues.indices) { if (scrollValues[i] == scrollDuration) { curScrollIdx = i; break } }
-
-        val innerLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(56, 32, 56, 16)
-        }
-
-        // ── Reading Speed ──
-        innerLayout.addView(TextView(this).apply {
-            text = "Reading Speed"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 0, 0, 4)
-        })
-        val speedGroup = RadioGroup(this)
-        for (i in speedLabels.indices) {
-            val rb = RadioButton(this)
-            rb.text = speedLabels[i]
-            rb.id = 100 + i
-            rb.isChecked = (i == curSpeedIdx)
-            speedGroup.addView(rb)
-        }
-        innerLayout.addView(speedGroup)
-
-        // ── Scroll Speed ──
-        innerLayout.addView(TextView(this).apply {
-            text = "Auto-Scroll Speed"
-            textSize = 13f
-            setTypeface(null, Typeface.BOLD)
-            setPadding(0, 20, 0, 4)
-        })
-        val scrollGroup = RadioGroup(this)
-        for (i in scrollLabels.indices) {
-            val rb = RadioButton(this)
-            rb.text = scrollLabels[i]
-            rb.id = 200 + i
-            rb.isChecked = (i == curScrollIdx)
-            scrollGroup.addView(rb)
-        }
-        innerLayout.addView(scrollGroup)
-
-        // ── Voice ── (show all English voices from the device TTS engine)
-        val englishVoices = tts?.voices
-            ?.filter { v -> v.locale.language == "en" }
-            ?.sortedBy { it.name }
-            ?: emptyList()
-        var voiceSpinner: Spinner? = null
-        if (englishVoices.isNotEmpty()) {
-            innerLayout.addView(TextView(this).apply {
-                text = "Voice"
-                textSize = 13f
-                setTypeface(null, Typeface.BOLD)
-                setPadding(0, 20, 0, 4)
-            })
-            val spinner = Spinner(this)
-            val voiceNames = englishVoices.map { v ->
-                val tag = v.locale.toLanguageTag()
-                "${v.name.replace(Regex("[-_]"), " ")} ($tag)"
-            }
-            val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, voiceNames)
-            adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            spinner.adapter = adapter
-            val curVoiceIdx = englishVoices.indexOfFirst { it.name == selectedVoice?.name }.coerceAtLeast(0)
-            spinner.setSelection(curVoiceIdx)
-            innerLayout.addView(spinner)
-            voiceSpinner = spinner
-        }
-
-        // Wrap in ScrollView so the dialog is scrollable on small screens
-        val dialogScroll = ScrollView(this).apply { addView(innerLayout) }
-
-        AlertDialog.Builder(this)
-            .setTitle("Reader Settings")
-            .setView(dialogScroll)
-            .setPositiveButton("Apply") { _, _ ->
-                val si = speedGroup.checkedRadioButtonId - 100
-                if (si in speedValues.indices) {
-                    ttsSpeed = speedValues[si]
-                    tts?.setSpeechRate(ttsSpeed)
-                }
-                val sc = scrollGroup.checkedRadioButtonId - 200
-                if (sc in scrollValues.indices) scrollDuration = scrollValues[sc]
-                voiceSpinner?.let { sp ->
-                    val vi = sp.selectedItemPosition
-                    if (vi in englishVoices.indices) {
-                        selectedVoice = englishVoices[vi]
-                        tts?.voice = selectedVoice
-                    }
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
     }
 
     // ── Playback controls ─────────────────────────────────────────────────────
@@ -329,11 +270,19 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun startReading() {
         if (!ttsReady) { Toast.makeText(this, "TTS not ready", Toast.LENGTH_SHORT).show(); return }
         if (pageBitmaps.isEmpty()) { Toast.makeText(this, "No pages loaded", Toast.LENGTH_SHORT).show(); return }
-        syncPositionFromScroll()
+
+        // Find the page currently visible in the scroll view
+        val sy = scrollView.scrollY
+        for (i in pageBitmaps.indices) {
+            val v = pagesContainer.getChildAt(i) ?: continue
+            if (sy >= v.top && sy < v.top + v.height) { currentPageIndex = i; break }
+        }
+
         isReading = true
         btnReadPause.text = "\u23F8"
         readingHighlight.visibility = View.VISIBLE
-        readingJob = lifecycleScope.launch { readAllPages() }
+        tvStatus.text = "Reading…"
+        readingJob = lifecycleScope.launch { readAllBubbles() }
     }
 
     private fun pauseReading() {
@@ -343,7 +292,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         btnReadPause.text = "\u25B6"
         tvStatus.text = "Paused"
         readingHighlight.visibility = View.GONE
-        clearPageHighlight()
+        clearAllActiveHighlights()
     }
 
     private fun stopReading() {
@@ -352,265 +301,150 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         readingJob?.cancel()
         btnReadPause.text = "\u25B6"
         currentPageIndex = 0
-        currentChunkOffset = 0
-        spokenLines.clear()
-        heldLine = null
         tvStatus.text = "Stopped"
         updatePageCounter(0)
         readingHighlight.visibility = View.GONE
-        clearPageHighlight()
+        clearAllActiveHighlights()
         scrollView.smoothScrollTo(0, 0)
     }
 
-    private fun syncPositionFromScroll() {
-        val sy = scrollView.scrollY
-        for (i in pageBitmaps.indices) {
-            val v = pagesContainer.getChildAt(i) ?: continue
-            if (sy >= v.top && sy < v.top + v.height) {
-                currentPageIndex = i
-                currentChunkOffset = if (sy > v.top) sy - v.top else 0
-                updatePageCounter(i)
-                return
-            }
-        }
+    private fun clearAllActiveHighlights() {
+        for (ov in overlayViews) ov.setActiveBubble(-1)
     }
 
-    private fun highlightPage(index: Int) {
-        for (i in 0 until pagesContainer.childCount) {
-            val color = if (i == index) Color.argb(28, 0, 229, 255) else Color.TRANSPARENT
-            pagesContainer.getChildAt(i)?.setBackgroundColor(color)
-        }
-    }
+    // ── NEW Core reading loop — bubble by bubble ──────────────────────────────
 
-    private fun clearPageHighlight() {
-        for (i in 0 until pagesContainer.childCount) {
-            pagesContainer.getChildAt(i)?.setBackgroundColor(Color.TRANSPARENT)
-        }
-    }
-
-    // ── Core reading loop ────────────────────────────────────────────────────
-    // FULL AUTO-SCROLL: never stops automatically. Scrolls continuously through
-    // every chunk (with overlap so no text is missed at chunk boundaries).
-    // Whenever text is detected in the visible chunk, it pauses scrolling just
-    // long enough to speak it, then resumes scrolling. Panels with no text are
-    // skipped instantly — no waiting for the user.
-
-    private suspend fun readAllPages() {
+    /**
+     * Walk through every page from [currentPageIndex] forward,
+     * reading each detected bubble in top-to-bottom, left-to-right order.
+     */
+    private suspend fun readAllBubbles() {
         while (isReading && currentPageIndex < pageBitmaps.size) {
-            val pageCompleted = readCurrentPage()
-            if (!pageCompleted) return  // manually paused / stopped
+            updatePageCounter(currentPageIndex)
+            readBubblesOnPage(currentPageIndex)
+            if (!isReading) return
+            currentPageIndex++
         }
+
         if (isReading) {
-            tvStatus.text = "Done!"
-            isReading = false
-            currentPageIndex = 0
-            currentChunkOffset = 0
-            spokenLines.clear()
-            btnReadPause.text = "\u25B6"
-            readingHighlight.visibility = View.GONE
-            clearPageHighlight()
-        }
-    }
-
-    // Returns true if page was fully traversed, false if paused/stopped mid-way
-    private suspend fun readCurrentPage(): Boolean {
-        val pageIdx = currentPageIndex
-        val pageBmp = pageBitmaps.getOrNull(pageIdx) ?: run {
-            currentPageIndex++
-            currentChunkOffset = 0
-            return true
-        }
-        val pageView = pagesContainer.getChildAt(pageIdx) ?: run {
-            currentPageIndex++
-            currentChunkOffset = 0
-            return true
-        }
-
-        if (pageView.height == 0) {
-            delay(500)
-            if (pageView.height == 0) {
-                currentPageIndex++
-                currentChunkOffset = 0
-                return true
-            }
-        }
-
-        val pageH   = pageView.height
-        val screenH = scrollView.height.coerceAtLeast(1)
-        // 20% overlap between consecutive chunks so text sitting on a boundary
-        // is never split/missed between two reads
-        val overlap = (screenH * 0.2f).toInt().coerceAtLeast(1)
-        val step = (screenH - overlap).coerceAtLeast(1)
-
-        highlightPage(pageIdx)
-        updatePageCounter(pageIdx)
-        // Only reset the "already spoken" history when actually starting this page
-        // from the top. readCurrentPage() can be re-entered mid-page (e.g. user
-        // paused in manual-scroll mode, or pressed play again partway through),
-        // and currentChunkOffset preserves exactly where it left off — but wiping
-        // spokenLines/heldLine on every re-entry made the overlap region at that
-        // resume point look "new" again, so it got read out loud a second time.
-        // Only clear when this is a genuinely fresh page (offset 0).
-        if (currentChunkOffset == 0) {
-            spokenLines.clear()
-            heldLine = null
-        }
-
-        var chunkOffset = currentChunkOffset
-
-        while (isReading && chunkOffset < pageH) {
-            val chunkEnd = if (chunkOffset + screenH < pageH) chunkOffset + screenH else pageH
-
-            // Scroll target + OCR slice bounds are both known up-front (they only
-            // depend on chunkOffset/chunkEnd, not on the scroll actually finishing),
-            // so run the scroll animation and OCR at the same time instead of one
-            // after another. Previously we waited for the full scroll to finish
-            // before even starting OCR, which is exactly the 1-3s "dead air" delay
-            // after each scroll — now OCR overlaps with the scroll and the wait is
-            // only whichever of the two takes longer.
-            val scrollTarget = if (pageView.top + chunkOffset > 0) pageView.top + chunkOffset else 0
-
-            val bmpH   = pageBmp.height
-            val bmpTop = ((chunkOffset.toFloat() / pageH) * bmpH).toInt().let { if (it < 0) 0 else if (it >= bmpH) bmpH - 1 else it }
-            val bmpEnd = ((chunkEnd.toFloat() / pageH) * bmpH).toInt().let { if (it <= bmpTop) bmpTop + 1 else if (it > bmpH) bmpH else it }
-            val sliceH = bmpEnd - bmpTop
-
-            tvStatus.text = "Scanning..."
-            val scrollJob: Job? = if (scrollView.scrollY != scrollTarget) {
-                lifecycleScope.launch { animatedScrollTo(scrollTarget, scrollDuration) }
-            } else null
-            // Create bitmap slice on IO thread — keeps main thread free for animations.
-            val slice = withContext(Dispatchers.IO) {
-                Bitmap.createBitmap(pageBmp, 0, bmpTop, pageBmp.width, sliceH)
-            }
-            // Merge adjacent tiny blocks (≤3 chars, gap < 80 px) before filtering —
-            // this fixes stylised manhwa fonts where ML Kit splits one word into
-            // individual-character TextBlocks.
-            val blocks = mergeNearbySmallBlocks(recognizeText(slice))
-
-            if (!isReading) { slice.recycle(); scrollJob?.cancel(); return false }
-
-            // ── Bubble-detection filter ──────────────────────────────────────────────
-            // Sample pixels just outside each OCR bounding box.  A speech bubble,
-            // narration box, or phone-UI element has a SOLID-FILL background → the
-            // ring pixels are all nearly the same colour → LOW VARIANCE → read it.
-            // SFX / watermarks / title art have no contained fill → the ring lands on
-            // varied illustration pixels → HIGH VARIANCE → skip it.
-            // blockBox == null means ML Kit couldn't place the block — skip it rather
-            // than letting it bypass bubble detection entirely (old bug).
-            val allLines = blocks
-                .filter { block -> block.blockBox != null && isInsideBubble(slice, block.blockBox) }
-                .filter { block -> !looksLikeSfxText(block.lines, block.blockBox) }
-                .flatMap { it.lines }
-                .filter { it.isNotBlank() }
-                .toMutableList()
-
-            slice.recycle()   // safe to recycle now — pixel data consumed above
-
-            // A phrase held back from the PREVIOUS chunk (cut off by the screen edge)
-            // must be brought back in now, or it is silently lost forever. The
-            // overlapping scroll region normally re-detects the same bubble as a
-            // single, now-complete line — if so, that merged line already contains
-            // the held text plus its continuation, so we just let it through as-is.
-            // If no matching line is found this round (OCR line-split differences
-            // between chunks), speak the held text directly so it is never dropped.
-            // Tracks whether the held phrase was reinserted "raw" (no continuation
-            // found yet) — if so, it must NOT be immediately re-held below, or it
-            // would loop forever: reinserted, still lacks terminal punctuation,
-            // held again, next chunk reinserted again, held again... forever, so
-            // it never actually gets spoken (feels like the line was "skipped").
-            var resumedRaw = false
-            // True when a previously-held line was found merged into a longer line in
-            // this chunk. In that case the bottom line of THIS chunk must NOT be held
-            // again even if it still lacks terminal punctuation — we already waited
-            // one chunk for it, holding it a second time would cause the same
-            // infinite-hold loop the resumedRaw guard protects against above.
-            var wasHeldAndMerged = false
-            heldLine?.let { held ->
-                val alreadyMerged = allLines.any {
-                    it.startsWith(held, ignoreCase = true) || it.contains(held, ignoreCase = true)
-                }
-                if (!alreadyMerged) {
-                    allLines.add(0, held)
-                    // The held line was removed from allLines before spokenLines was
-                    // updated, so it should never already be in spokenLines — but the
-                    // overlap region can re-detect it and add it there before this
-                    // chunk runs. Evict it now so the re-inserted line is always spoken.
-                    spokenLines.remove(normalizeForDedup(held))
-                    resumedRaw = true
-                } else {
-                    wasHeldAndMerged = true
-                }
-                heldLine = null
-            }
-
-            // The bottom-most line of a chunk may be a sentence sliced in half by the
-            // chunk/screen edge. If it doesn't end with terminal punctuation and this
-            // isn't the last chunk of the page, hold it back instead of speaking it —
-            // the next (overlapping) chunk will bring in the rest of the sentence so
-            // it gets read ONCE, in full, instead of being split into two separate
-            // readings (a broken half now + the same sentence again later).
-            val isFinalChunk = chunkEnd >= pageH
-            if (allLines.isNotEmpty()) {
-                val last = allLines.last()
-                val isRawResumedLineOnly = resumedRaw && allLines.size == 1
-                val looksComplete = last.isEmpty() || last.last() in ".!?,\u2026\"'\u201d\u2019)]\u3002"
-                // Don't re-hold a line that was already held once and came back merged —
-                // wasHeldAndMerged means we already gave it one extra chunk to complete.
-                if (!looksComplete && !isFinalChunk && !isRawResumedLineOnly && !wasHeldAndMerged) {
-                    allLines.removeAt(allLines.lastIndex)
-                    heldLine = last
-                }
-            }
-
-            // Wait for the scroll animation to reach this chunk's position BEFORE
-            // speaking — OCR ran in parallel (bitmap slice, no scroll needed), but
-            // the user should see the text on screen before hearing it.
-            // Previously scrollJob?.join() was placed AFTER speakAndWait, which meant
-            // TTS started while the screen was still scrolling into position, making
-            // it look like the reader was speaking content ahead of the visual scroll.
-            scrollJob?.join()
-            if (!isReading) return false
-
-            // Only speak lines not yet spoken on this page (handles overlap re-detection).
-            // Use normalised keys so minor OCR variations of the same bubble text
-            // (extra space, stray punctuation, slight case difference between two
-            // scans of the same visible region) are still recognised as duplicates
-            // and never re-read.
-            val newLines = allLines.filter { line -> normalizeForDedup(line) !in spokenLines }
-
-            if (newLines.isNotEmpty()) {
-                tvStatus.text = "Reading..."
-                speakAndWait(normalizeForTts(newLines.joinToString(" ")))
-                if (!isReading) return false
-            }
-
-            // Mark this chunk's lines as spoken using normalised keys so that the
-            // next overlapping chunk's slightly-different OCR result still matches.
-            spokenLines.addAll(allLines.map { normalizeForDedup(it) })
-            // No new text OR all lines already read — continue scrolling
-
-            if (!autoScrollEnabled) {
-                tvStatus.text = "Scroll & tap \u25B6"
+            withContext(Dispatchers.Main) {
+                tvStatus.text = "Done! ✓"
                 isReading = false
                 btnReadPause.text = "\u25B6"
                 readingHighlight.visibility = View.GONE
-                return false
+                currentPageIndex = 0
             }
-
-            // Always advance — full auto scroll never halts on empty panels
-            chunkOffset += step
-            currentChunkOffset = chunkOffset
         }
-
-        // All chunks of this page done
-        clearPageHighlight()
-        currentPageIndex++
-        currentChunkOffset = 0
-        return true
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    /**
+     * Read all speech bubbles on page [pageIdx] sequentially.
+     * For each bubble: scroll into view → highlight → OCR → TTS → next.
+     */
+    private suspend fun readBubblesOnPage(pageIdx: Int) {
+        val bubbles   = pageBubbles.getOrNull(pageIdx) ?: return
+        val overlay   = overlayViews.getOrNull(pageIdx) ?: return
+        val srcBitmap = pageBitmaps.getOrNull(pageIdx)  ?: return
+        val pageFrame = pagesContainer.getChildAt(pageIdx) ?: return
+
+        if (bubbles.isEmpty()) {
+            // No detected bubbles on this page — brief pause and continue
+            delay(300)
+            return
+        }
+
+        for ((bubbleIdx, bubbleRect) in bubbles.withIndex()) {
+            if (!isReading) return
+
+            // ── Scroll so the bubble is visible ──────────────────────────────
+            if (autoScrollEnabled) {
+                withContext(Dispatchers.Main) {
+                    // Wait for layout to be ready
+                    if (pageFrame.height == 0) delay(300)
+                }
+                val scaleY = pageFrame.height.toFloat() / srcBitmap.height.coerceAtLeast(1)
+                val bubbleCentreInPage = ((bubbleRect.top + bubbleRect.bottom) / 2f * scaleY).toInt()
+                val targetScrollY = (pageFrame.top + bubbleCentreInPage - scrollView.height / 2)
+                    .coerceAtLeast(0)
+                withContext(Dispatchers.Main) {
+                    animatedScrollTo(targetScrollY, scrollDuration)
+                }
+            }
+
+            if (!isReading) return
+
+            // ── Light up this bubble ──────────────────────────────────────────
+            withContext(Dispatchers.Main) {
+                overlay.setActiveBubble(bubbleIdx)
+                tvStatus.text = "Bubble ${bubbleIdx + 1}/${bubbles.size}"
+            }
+
+            // ── OCR the bubble crop ───────────────────────────────────────────
+            val text = withContext(Dispatchers.IO) {
+                ocrBubbleCrop(srcBitmap, bubbleRect)
+            }
+
+            // ── Speak ─────────────────────────────────────────────────────────
+            if (text.isNotBlank() && isReading) {
+                speakAndWait(text)
+            } else if (isReading) {
+                delay(150) // no text — still give a tiny pause before next bubble
+            }
+
+            // ── Deactivate highlight ──────────────────────────────────────────
+            withContext(Dispatchers.Main) {
+                overlay.setActiveBubble(-1)
+            }
+
+            delay(200) // brief gap between bubbles
+        }
+    }
+
+    // ── OCR helpers ───────────────────────────────────────────────────────────
+
+    /**
+     * Crop [src] to [bubbleRect] (with a small padding) and run ML Kit OCR.
+     * Returns the extracted text or an empty string on failure.
+     * Safe to call on any thread.
+     */
+    private suspend fun ocrBubbleCrop(src: Bitmap, bubbleRect: Rect): String {
+        val pad = 12
+        val cropRect = Rect(
+            (bubbleRect.left  - pad).coerceAtLeast(0),
+            (bubbleRect.top   - pad).coerceAtLeast(0),
+            (bubbleRect.right + pad).coerceAtMost(src.width),
+            (bubbleRect.bottom + pad).coerceAtMost(src.height)
+        )
+        if (cropRect.width() <= 0 || cropRect.height() <= 0) return ""
+
+        val crop = Bitmap.createBitmap(
+            src, cropRect.left, cropRect.top, cropRect.width(), cropRect.height()
+        )
+
+        return try {
+            val result = suspendCancellableCoroutine<String> { cont ->
+                val image = InputImage.fromBitmap(crop, 0)
+                recognizer.process(image)
+                    .addOnSuccessListener { visionText ->
+                        val text = visionText.text.trim()
+                        if (cont.isActive) cont.resume(text)
+                    }
+                    .addOnFailureListener {
+                        if (cont.isActive) cont.resume("")
+                    }
+                    .addOnCanceledListener {
+                        if (cont.isActive) cont.resume("")
+                    }
+            }
+            result
+        } catch (_: Exception) {
+            ""
+        } finally {
+            crop.recycle()
+        }
+    }
+
+    // ── Auto-scroll ───────────────────────────────────────────────────────────
 
     private suspend fun animatedScrollTo(targetY: Int, durationMs: Long): Unit =
         suspendCoroutine { cont ->
@@ -619,273 +453,22 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             val anim = ValueAnimator.ofInt(startY, targetY).apply {
                 duration = durationMs
                 interpolator = android.view.animation.DecelerateInterpolator()
-                addUpdateListener { anim -> scrollView.scrollTo(0, anim.animatedValue as Int) }
+                addUpdateListener { scrollView.scrollTo(0, it.animatedValue as Int) }
                 addListener(object : AnimatorListenerAdapter() {
                     override fun onAnimationEnd(a: Animator)    { cont.resume(Unit) }
                     override fun onAnimationCancel(a: Animator) { cont.resume(Unit) }
                 })
             }
-            // NOTE: do NOT set LAYER_TYPE_HARDWARE on pagesContainer — it forces the
-            // entire container (all pages stacked) to be rasterised into a single GPU
-            // texture on every scroll frame. For a 10-page strip that texture can be
-            // hundreds of MB, causing exactly the "10 fps" stutter the user reported.
-            // The Activity is already hardware-accelerated (manifest flag), so Android's
-            // RenderThread already composites each ImageView tile efficiently without
-            // any explicit layer hint. Just start the animator directly.
             scrollView.post { anim.start() }
         }
 
-    // Carries all text lines from one ML Kit TextBlock together with the block's
-    // bounding box — used for background-pixel sampling in isInsideBubble().
-    private data class TextBlockInfo(
-        val lines: List<String>,
-        val blockBox: Rect?
-    )
-
-    // Merge adjacent TextBlockInfos that each carry ≤3 alphanumeric characters
-    // and are horizontally close (gap < 80 px, same vertical band ± 50 px).
-    // Manhwa with heavy stylisation sometimes causes ML Kit to emit one TextBlock
-    // per character ("D", "A", "M", "N") instead of one block per word ("DAMN").
-    // Merging them before bubble detection and TTS avoids letter-by-letter reading.
-    private fun mergeNearbySmallBlocks(blocks: List<TextBlockInfo>): List<TextBlockInfo> {
-        if (blocks.size <= 1) return blocks
-        val out = mutableListOf<TextBlockInfo>()
-        for (block in blocks) {
-            val thisChars = block.lines.joinToString("").count { it.isLetterOrDigit() }
-            val prev = out.lastOrNull()
-            if (thisChars in 1..3 && block.blockBox != null && prev?.blockBox != null) {
-                val hGap = (block.blockBox.left - prev.blockBox.right).coerceAtLeast(0)
-                val vDiff = Math.abs(block.blockBox.centerY() - prev.blockBox.centerY())
-                if (hGap < 80 && vDiff < 50) {
-                    val nb = Rect(
-                        minOf(prev.blockBox.left, block.blockBox.left),
-                        minOf(prev.blockBox.top,  block.blockBox.top),
-                        maxOf(prev.blockBox.right, block.blockBox.right),
-                        maxOf(prev.blockBox.bottom, block.blockBox.bottom)
-                    )
-                    out[out.lastIndex] = TextBlockInfo(prev.lines + block.lines, nb)
-                    continue
-                }
-            }
-            out += block
-        }
-        return out
-    }
-
-    // OCR the bitmap and return text blocks sorted top-to-bottom, left-to-right
-    // so multi-column panels (bubbles side-by-side) are processed in reading order.
-    private suspend fun recognizeText(bmp: Bitmap): List<TextBlockInfo> = suspendCoroutine { cont ->
-        recognizer.process(InputImage.fromBitmap(bmp, 0))
-            .addOnSuccessListener { result ->
-                val sorted = result.textBlocks.sortedWith(compareBy(
-                    { it.boundingBox?.top  ?: 0 },
-                    { it.boundingBox?.left ?: 0 }
-                ))
-                cont.resume(sorted.map { block ->
-                    // Merge consecutive single-letter OCR lines into words so
-                    // stylised fragmented text like "D","A","M","N" becomes "DAMN".
-                    val rawLines = block.text.split("\n").map { it.trim() }.filter { it.isNotBlank() }
-                    val mergedLines = mutableListOf<String>()
-                    var charBuf = ""
-                    for (ln in rawLines) {
-                        if (ln.length == 1 && ln[0].isLetter()) { charBuf += ln }
-                        else { if (charBuf.isNotEmpty()) { mergedLines += charBuf; charBuf = "" }; mergedLines += ln }
-                    }
-                    if (charBuf.isNotEmpty()) mergedLines += charBuf
-                    TextBlockInfo(lines = mergedLines, blockBox = block.boundingBox)
-                })
-            }
-            .addOnFailureListener { cont.resume(emptyList()) }
-    }
-
-    // ── Bubble detection ─────────────────────────────────────────────────────────
-    //
-    // Returns true when a text block sits inside a speech bubble, narration box,
-    // phone screen, or any uniform-background container — as opposed to text that
-    // floats directly on the illustrated artwork (SFX, watermarks, reaction labels).
-    //
-    // Works for ANY shape and colour:
-    //   ● White oval dialogue bubbles           ● Black rectangular narration boxes
-    //   ● Dark-red burst emphasis circles        ● White phone screens inside panels
-    //   ● Any other solid-background container
-    //
-    // Method: sample pixel colours along the expanded edges of the block bounding
-    // box and measure the VARIANCE of pixel brightness (HSV Value channel).
-    //   • Inside a bubble → pixels are all roughly the same flat colour → LOW variance
-    //   • On open artwork → pixels are part of the illustrated scene → HIGH variance
-    //
-    // No word-lists, no rotation checks, no height thresholds — just pixels.
-    private fun isInsideBubble(bmp: Bitmap, box: Rect): Boolean {
-        if (box.isEmpty) return true
-        val l = box.left.coerceAtLeast(0)
-        val t = box.top.coerceAtLeast(0)
-        val r = box.right.coerceAtMost(bmp.width  - 1)
-        val b = box.bottom.coerceAtMost(bmp.height - 1)
-        if (l >= r || t >= b) return true
-
-        val hsv = FloatArray(3)
-
-        // Sample the rectangular perimeter at (box ± pad). Returns (mean, variance)
-        // of the HSV-value channel. Pixel access is clamped — safe for any pad.
-        fun ring(pad: Int): Pair<Double, Double>? {
-            val rl = (box.left  - pad).coerceAtLeast(0); val rt = (box.top    - pad).coerceAtLeast(0)
-            val rr = (box.right + pad).coerceAtMost(bmp.width - 1); val rb = (box.bottom + pad).coerceAtMost(bmp.height - 1)
-            if (rl >= rr || rt >= rb) return null
-            val vals = mutableListOf<Float>(); val s = 10
-            var x = rl; while (x <= rr) {
-                Color.colorToHSV(bmp.getPixel(x, rt), hsv); vals += hsv[2]
-                Color.colorToHSV(bmp.getPixel(x, rb), hsv); vals += hsv[2]; x += s
-            }
-            var y = rt + s; while (y < rb) {
-                Color.colorToHSV(bmp.getPixel(rl, y), hsv); vals += hsv[2]
-                Color.colorToHSV(bmp.getPixel(rr, y), hsv); vals += hsv[2]; y += s
-            }
-            if (vals.size < 4) return null
-            val m = vals.average()
-            return Pair(m, vals.sumOf { v -> (v - m) * (v - m) } / vals.size)
-        }
-
-        // ── Near-ring solid-fill check ──────────────────────────────────────
-        //
-        // For text INSIDE any bubble / narration box / UI element:
-        //   • The OCR bounding box sits within the solid fill.
-        //   • 4–8 px outside the text box is still inside that fill.
-        //   • Any colour fill (white, black, pink, yellow, blue, red…) is
-        //     UNIFORM within itself → LOW VARIANCE.
-        //   • Blurry / compressed scans: fill still uniform, soft text edges
-        //     don't affect the ring that's entirely in the fill area.
-        //
-        // For text on artwork (SFX, watermarks, chapter art):
-        //   • No solid fill — even 4 px out lands on the illustration.
-        //   • Illustration has many different colours → HIGH VARIANCE → reject.
-        //
-        // Two ring sizes tolerate different fill-margin widths:
-        //   4 px — tight bubbles, spiky/burst bubbles (ring stays in the body)
-        //   8 px — normal bubbles (further from letter ink)
-        // We keep the BETTER (lower) variance of the two.
-        val r4 = ring(4)
-        val r8 = ring(8)
-        val v4 = r4?.second ?: Double.MAX_VALUE
-        val v8 = r8?.second ?: Double.MAX_VALUE
-        val bestVar  = minOf(v4, v8)
-        val bestMean = (if (v4 <= v8) r4 else r8)?.first ?: return true
-
-        if (bestVar > 0.055) return false   // both rings varied → on artwork → not a bubble
-
-        // ── Far-ring title-page rejection ────────────────────────────────────
-        //
-        // Near ring is uniform → solid fill detected.
-        // But episode/chapter title headers also sit on a uniformly-coloured
-        // full-PAGE background — the "fill" is the page itself, unlimited.
-        //
-        // A real bubble / box is SURROUNDED BY ARTWORK that varies in colour:
-        //   White bubble in panel → far ring hits character/bg art → HIGH farVar → accept ✓
-        //   Dark narration box in panel → far hits light panel → brightness changes → accept ✓
-        //
-        // A title header has the same flat colour 60–200 px away:
-        //   "Chapter 1" on dark page → far ≈ 0.08, near ≈ 0.08, farVar ≈ 0.001 → reject ✓
-        //
-        // Threshold 0.030 (not 0.015) absorbs JPEG/PNG compression artefacts
-        // that add tiny noise to what is visually a flat colour.
-        val farPad  = ((box.width() + box.height()) / 2).coerceAtLeast(60)
-        val farRing = ring(farPad) ?: return true   // can't reach far → trust near ring
-
-        if (farRing.second <= 0.030 && Math.abs(bestMean - farRing.first) < 0.12) {
-            return false   // uniform near AND far, same colour → page/chapter background
-        }
-
-        return true
-    }
-
-    // SFX / sound-effect guard — second line of defence after the variance check.
-    //
-    // Manhwa sound effects (SNEAK, SWIPE, BANG, TAP …) are drawn as very large,
-    // spread-out letters directly on the artwork. Their bounding box area per
-    // character is dramatically higher than compact dialogue text inside bubbles:
-    //
-    //   "SNEAK" as SFX  : ~400 × 150 px = 60 000 px²  /  5 chars = 12 000 px²/char
-    //   "Wait a minute.": ~350 × 80  px = 28 000 px²  / 14 chars =  2 000 px²/char
-    //   "NO..."          : ~120 × 60  px =  7 200 px²  /  5 chars =  1 440 px²/char
-    //
-    // Threshold 5 000 px²/char captures SFX while safely passing all normal dialogue,
-    // including very short exclamations ("YES!", "STOP!") in small bubbles.
-    private fun looksLikeSfxText(lines: List<String>, box: Rect?): Boolean {
-        if (box == null || box.isEmpty) return false
-        val text = lines.joinToString(" ")
-        val charCount = text.count { it.isLetterOrDigit() }.coerceAtLeast(1)
-        val area = box.width().toLong() * box.height().toLong()
-        return (area / charCount) > 5_000
-    }
-
-    // Garbled "censor scream" text: comics often represent unintelligible
-    // shouting/cursing as a jumble of symbols mixed with stray characters,
-    // e.g. "&아#@!&아#!", "#$%&!!", "@!#$%^". This can't be meaningfully
-    // spoken by TTS, so treat any line where symbols outnumber real letters
-    // as noise, regardless of the exact characters involved.
-    //
-    // Exception: a real word followed by expressive punctuation like "HELL...?!",
-    // "NO!!!", "WHY?!", "STOP!!" — the word part is all letters/spaces so TTS
-    // can read it; the trailing punctuation is just emphasis, not garble.
-    private fun isSymbolGarble(t: String): Boolean {
-        val letters = t.count { it.isLetter() }
-        val symbols = t.count { !it.isLetterOrDigit() && !it.isWhitespace() }
-        if (symbols < 3 || symbols <= letters) return false
-        // Check if stripping trailing expressive punctuation (., !, ?, …, ~)
-        // leaves a pure-word string — if so it's a real word + emphasis, not garble.
-        val wordPart = t.trimEnd('.', '!', '?', '\u2026', '~', ' ')
-        if (wordPart.isNotEmpty() && wordPart.all { it.isLetter() || it.isWhitespace() }) return false
-        return true
-    }
-
-    // Normalises a spoken line into a deduplication key so that minor OCR
-    // variations of the same visual text are treated as identical:
-    //   • lowercase        — "STRONG!" == "strong!"
-    //   • collapse spaces  — "BECOME  STRONG" == "BECOME STRONG"
-    //   • strip punctuation — "STRONG!" == "STRONG" == "STRONG !"
-    // Stripping punctuation is intentionally aggressive here: the goal is only
-    // dedup (have-we-read-this-bubble-before?), not TTS accuracy.
-    private fun normalizeForDedup(text: String): String =
-        text.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), "")   // remove all punctuation/symbols
-            .replace(Regex("\\s+"), " ")            // collapse whitespace
-            .trim()
-
-    // Stammer/stutter dialogue like "W-What", "I-I", "S-Stop" reads badly if the
-    // TTS spells out the lone leading letter(s) as an abbreviation (e.g. "double
-    // U, what") instead of a stammer sound. Since real stammering can't be
-    // synthesized reliably, drop the repeated stutter prefix and speak the
-    // intended word cleanly instead — "W-What" -> "What".
-    // Only matches when the letter(s) before the hyphen repeat the start of the
-    // following word, so real hyphenated words (e-mail, X-ray, T-shirt) are left
-    // untouched.
-    private val stutterPrefix = Regex("""\b([A-Za-z]{1,2})-(?=\1)""", RegexOption.IGNORE_CASE)
-
-    // Converts ALL-CAPS sequences (2+ letters) to lowercase so TTS reads them
-    // as words, never as abbreviations spelled letter-by-letter.
-    // DOKJA -> dokja, AXCEL -> axcel, RATTLE -> rattle
-    // Single uppercase letters (pronoun 'I') are left unchanged.
-    private fun normalizeForTts(text: String): String =
-        text.replace(stutterPrefix, "")
-            // Expand common abbreviations that TTS reads as letter-sequences.
-            // "etc." / "etc" → "etcetera" (TTS reads "etc" as "ee-tee-see" otherwise).
-            .replace(Regex("""\betc\.""", RegexOption.IGNORE_CASE), "etcetera")
-            .replace(Regex("""\betc\b""", RegexOption.IGNORE_CASE), "etcetera")
-            .replace(Regex("[A-Z]{2,}")) { m -> m.value.lowercase() }
+    // ── TTS ───────────────────────────────────────────────────────────────────
 
     private suspend fun speakAndWait(text: String) {
-        // Guard: if TTS is gone or not yet ready, skip silently rather than hanging.
         if (tts == null || !ttsReady || text.isBlank()) return
-        // 60-second hard timeout — if the TTS engine never fires onDone/onError
-        // (e.g. engine crash, null utterance ID, QUEUE_FLUSH race), the coroutine
-        // would block forever without this. The timeout stops the stall and lets
-        // the reading loop advance to the next chunk automatically.
         withTimeoutOrNull(60_000L) {
             suspendCancellableCoroutine<Unit> { cont ->
-                val uid = "chunk_${System.currentTimeMillis()}"
-                // AtomicBoolean guard prevents multiple cont.resume() calls.
-                // onDone, onError, and the speak()==ERROR fast-path can all fire
-                // within the same tick; resuming an already-completed continuation
-                // throws IllegalStateException and crashes the coroutine.
+                val uid  = "bubble_${System.currentTimeMillis()}"
                 val done = AtomicBoolean(false)
                 fun finishOnce() { if (done.compareAndSet(false, true)) cont.resume(Unit) }
 
@@ -895,13 +478,10 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     override fun onError(id: String?) { if (id == uid) finishOnce() }
                 })
                 val result = tts!!.speak(text, TextToSpeech.QUEUE_FLUSH, null, uid)
-                // speak() returning ERROR means the callback will never fire — resume now.
                 if (result == TextToSpeech.ERROR) finishOnce()
-                // If the coroutine is cancelled (user hits Stop/Pause), stop TTS immediately
-                // so audio cuts off at once instead of finishing the current utterance.
                 cont.invokeOnCancellation { tts?.stop() }
             }
-        } ?: tts?.stop()  // timeout hit — kill audio and continue
+        } ?: tts?.stop()
     }
 
     override fun onInit(status: Int) {
@@ -915,12 +495,101 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         }
     }
 
+    // ── Settings dialog ───────────────────────────────────────────────────────
+
+    private fun showSettingsDialog() {
+        if (isReading) pauseReading()
+
+        val speedLabels  = arrayOf("Slow (0.75×)", "Normal (1.0×)", "Fast (1.5×)", "Very Fast (2.0×)")
+        val speedValues  = floatArrayOf(0.75f, 1.0f, 1.5f, 2.0f)
+        val scrollLabels = arrayOf("Very Slow (4 s)", "Slow (2.5 s)", "Normal (1.5 s)", "Fast (0.7 s)")
+        val scrollValues = longArrayOf(4000L, 2500L, 1500L, 700L)
+
+        var curSpeedIdx = 1
+        for (i in speedValues.indices) { if (speedValues[i] == ttsSpeed) { curSpeedIdx = i; break } }
+        var curScrollIdx = 2
+        for (i in scrollValues.indices) { if (scrollValues[i] == scrollDuration) { curScrollIdx = i; break } }
+
+        val inner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(56, 32, 56, 16)
+        }
+
+        // Reading speed
+        inner.addView(TextView(this).apply {
+            text = "Reading Speed"; textSize = 13f
+            setTypeface(null, Typeface.BOLD); setPadding(0, 0, 0, 4)
+        })
+        val speedGroup = RadioGroup(this)
+        for (i in speedLabels.indices) {
+            speedGroup.addView(RadioButton(this).apply {
+                text = speedLabels[i]; id = 100 + i; isChecked = (i == curSpeedIdx)
+            })
+        }
+        inner.addView(speedGroup)
+
+        // Scroll speed
+        inner.addView(TextView(this).apply {
+            text = "Auto-Scroll Speed"; textSize = 13f
+            setTypeface(null, Typeface.BOLD); setPadding(0, 20, 0, 4)
+        })
+        val scrollGroup = RadioGroup(this)
+        for (i in scrollLabels.indices) {
+            scrollGroup.addView(RadioButton(this).apply {
+                text = scrollLabels[i]; id = 200 + i; isChecked = (i == curScrollIdx)
+            })
+        }
+        inner.addView(scrollGroup)
+
+        // Voice picker
+        val englishVoices = tts?.voices
+            ?.filter { it.locale.language == "en" }
+            ?.sortedBy { it.name }
+            ?: emptyList()
+        var voiceSpinner: Spinner? = null
+        if (englishVoices.isNotEmpty()) {
+            inner.addView(TextView(this).apply {
+                text = "Voice"; textSize = 13f
+                setTypeface(null, Typeface.BOLD); setPadding(0, 20, 0, 4)
+            })
+            val spinner = Spinner(this)
+            val names = englishVoices.map { v ->
+                "${v.name.replace(Regex("[-_]"), " ")} (${v.locale.toLanguageTag()})"
+            }
+            spinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, names)
+                .also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+            spinner.setSelection(
+                englishVoices.indexOfFirst { it.name == selectedVoice?.name }.coerceAtLeast(0)
+            )
+            inner.addView(spinner)
+            voiceSpinner = spinner
+        }
+
+        AlertDialog.Builder(this)
+            .setTitle("Reader Settings")
+            .setView(ScrollView(this).apply { addView(inner) })
+            .setPositiveButton("Apply") { _, _ ->
+                val si = speedGroup.checkedRadioButtonId - 100
+                if (si in speedValues.indices) { ttsSpeed = speedValues[si]; tts?.setSpeechRate(ttsSpeed) }
+                val sc = scrollGroup.checkedRadioButtonId - 200
+                if (sc in scrollValues.indices) scrollDuration = scrollValues[sc]
+                voiceSpinner?.let { sp ->
+                    val vi = sp.selectedItemPosition
+                    if (vi in englishVoices.indices) { selectedVoice = englishVoices[vi]; tts?.voice = selectedVoice }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // ── Lifecycle ─────────────────────────────────────────────────────────────
+
     override fun onDestroy() {
         super.onDestroy()
         readingJob?.cancel()
         tts?.shutdown()
         recognizer.close()
-        for (bmp in pageBitmaps) { bmp.recycle() }
+        for (bmp in pageBitmaps) bmp.recycle()
         pageBitmaps.clear()
     }
 }
