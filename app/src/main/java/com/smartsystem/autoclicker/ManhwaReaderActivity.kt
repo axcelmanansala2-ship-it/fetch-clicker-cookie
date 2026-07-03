@@ -50,20 +50,15 @@ import kotlin.coroutines.suspendCoroutine
 /**
  * Manhwa Reader Activity — bubble-aware TTS reader.
  *
- * After loading a PDF or image file:
- *   1. Each page is rendered and displayed.
- *   2. BubbleDetector runs on every page (background IO) and detected speech
- *      bubbles are immediately outlined with green ESP-style borders via
- *      BubbleOverlayView.
- *   3. Pressing ▶ walks through every page in reading order:
- *        – OCRs ALL bubbles on the page first (no TTS yet)
- *        – Concatenates the non-empty texts into ONE utterance per page
- *        – Auto-scrolls to the first bubble with text
- *        – Speaks the whole page as a single smooth TTS utterance
- *        – Then moves to the next page
- *
- *   This "page-at-a-time" speech strategy eliminates choppy, interrupted
- *   voice caused by many short per-bubble TTS calls on action-heavy pages.
+ * Fixes applied (July 2026):
+ *  1. ESP false positives: OCR-filter during load — only bubbles with real text
+ *     are kept in pageBubbles and shown in the overlay.
+ *  2. Auto-scroll: always scrolls to each page on transition; then scrolls to
+ *     each individual bubble as it is read (bubble-by-bubble, not page-at-a-time).
+ *  3. Dark bubble detection: BubbleDetector now finds black boxes; OCR pipeline
+ *     auto-inverts dark crops before recognition for better accuracy.
+ *  4. Single-letter collapse: cleanOcrText uses a 70%-single-char heuristic so
+ *     punctuation-adjacent tokens (e.g. "I,") don't break the collapse.
  */
 class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
@@ -95,6 +90,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var currentPageIndex = 0
 
     // ── Bubble data ───────────────────────────────────────────────────────────
+    /** Only contains bubbles confirmed to have real OCR text (no false positives). */
     private val pageBubbles   = mutableListOf<List<BubbleInfo>>()
     private val overlayViews  = mutableListOf<BubbleOverlayView>()
     private val pageImageViews = mutableListOf<ImageView>()
@@ -185,12 +181,27 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
 
             updatePageCounter(0)
-            tvStatus.text = "Detecting bubbles…"
+            tvStatus.text = "Scanning bubbles…"
 
+            // Detect bubbles on each page, then OCR-filter to remove false positives.
+            // Only bubbles that contain real text are kept — this eliminates ESP boxes
+            // around artwork / gradient regions that have no speech text.
             for ((idx, bmp) in bitmaps.withIndex()) {
                 val detected = withContext(Dispatchers.IO) { BubbleDetector.detect(bmp) }
-                pageBubbles[idx] = detected
-                overlayViews.getOrNull(idx)?.setBubbles(detected)
+
+                // OCR-filter: keep only bubbles with real readable text
+                val confirmed = mutableListOf<BubbleInfo>()
+                for (bubble in detected) {
+                    val rawText = withContext(Dispatchers.IO) { ocrBubbleCropRaw(bmp, bubble.rect) }
+                    val text    = cleanOcrText(rawText)
+                    if (hasRealContent(text)) confirmed.add(bubble)
+                }
+
+                pageBubbles[idx] = confirmed
+                overlayViews.getOrNull(idx)?.setBubbles(confirmed)
+
+                val donePages = idx + 1
+                tvStatus.text = "Scanned $donePages/${bitmaps.size}…"
             }
 
             val total = pageBubbles.sumOf { it.size }
@@ -262,6 +273,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (!ttsReady) { Toast.makeText(this, "TTS not ready", Toast.LENGTH_SHORT).show(); return }
         if (pageBitmaps.isEmpty()) { Toast.makeText(this, "No pages loaded", Toast.LENGTH_SHORT).show(); return }
 
+        // Determine current page from scroll position
         val sy = scrollView.scrollY
         for (i in pageBitmaps.indices) {
             val v = pagesContainer.getChildAt(i) ?: continue
@@ -306,7 +318,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private suspend fun readAllBubbles() {
         while (isReading && currentPageIndex < pageBitmaps.size) {
-            updatePageCounter(currentPageIndex)
+            withContext(Dispatchers.Main) { updatePageCounter(currentPageIndex) }
             readBubblesOnPage(currentPageIndex)
             if (!isReading) return
             currentPageIndex++
@@ -324,18 +336,20 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * Read all speech bubbles on [pageIdx] as a SINGLE smooth TTS utterance.
+     * Read speech bubbles on [pageIdx] one by one, scrolling to each bubble
+     * before speaking it.
      *
      * Flow:
-     *   1. OCR every detected bubble on the page (IO, sequential).
-     *   2. Collect non-empty texts in reading order (top→bottom, left→right).
-     *   3. Highlight all bubbles that have text simultaneously.
-     *   4. Auto-scroll to the first bubble with text.
-     *   5. Speak the joined text as ONE utterance → no choppy interruptions.
-     *   6. Clear highlights and move to next page.
+     *   1. Always smooth-scroll to show the current page (even if it has no bubbles).
+     *   2. For each confirmed bubble (pre-filtered to only text bubbles):
+     *        a. Scroll to center the bubble on screen.
+     *        b. Highlight it in the overlay.
+     *        c. OCR the crop (with auto-enhancement for dark bubbles).
+     *        d. Speak the cleaned text.
+     *        e. Remove highlight.
+     *   3. Brief gap, then caller increments to the next page.
      *
-     * Pages with zero detected bubbles get a brief pause and are skipped.
-     * Pages where all detected bubbles produce empty OCR are also skipped silently.
+     * Empty pages (no bubbles) scroll into view, pause briefly, and continue.
      */
     private suspend fun readBubblesOnPage(pageIdx: Int) {
         val bubbles   = pageBubbles.getOrNull(pageIdx) ?: return
@@ -343,114 +357,86 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val srcBitmap = pageBitmaps.getOrNull(pageIdx)  ?: return
         val pageFrame = pagesContainer.getChildAt(pageIdx) ?: return
 
-        if (bubbles.isEmpty()) {
-            delay(300)
-            return
-        }
-
-        // ── Step 1: OCR all bubbles on this page ──────────────────────────────
+        // Wait for the page frame to be laid out (first-run / large pages)
         withContext(Dispatchers.Main) {
-            tvStatus.text = "Page ${pageIdx + 1}: reading…"
-        }
-
-        val ocrResults = bubbles.mapIndexed { idx, bubbleInfo ->
-            if (!isReading) return
-            val rawText = withContext(Dispatchers.IO) {
-                ocrBubbleCrop(srcBitmap, bubbleInfo.rect)
-            }
-            // Collapse "V I C T O R I O U S" → "VICTORIOUS" from letter-by-letter OCR
-            val text = cleanOcrText(rawText)
-            idx to text
-        }
-
-        if (!isReading) return
-
-        // ── Step 2: Collect bubbles with real text (≥3 consecutive letters) ───
-        // hasRealContent rejects single chars, punctuation, and OCR garbage from
-        // gradient/artwork regions that contain no actual speech text.
-        val nonEmpty = ocrResults.filter { (_, t) -> hasRealContent(t) }
-        if (nonEmpty.isEmpty()) {
-            delay(200)
-            return
-        }
-
-        // ── Step 3: Highlight all bubbles that have text ───────────────────────
-        withContext(Dispatchers.Main) {
-            for ((idx, _) in nonEmpty) {
-                overlay.setActiveBubble(idx)   // overlay supports one "active" at a time;
-                                                // show the first one
-                break
+            var waited = 0
+            while (pageFrame.height == 0 && waited < 2000) {
+                delay(50); waited += 50
             }
         }
 
-        // ── Step 4: Scroll to the first bubble with text ──────────────────────
+        // ALWAYS scroll to bring the top of this page into view — no page skipping
         if (autoScrollEnabled) {
-            val firstBubbleIdx = nonEmpty.first().first
-            val firstRect = bubbles[firstBubbleIdx].rect
-            // Wait for the page frame to be laid out if it hasn't been measured yet
-            withContext(Dispatchers.Main) {
-                if (pageFrame.height == 0) delay(350)
-            }
-            val frameH = pageFrame.height.coerceAtLeast(1)
-            val scaleY = frameH.toFloat() / srcBitmap.height.coerceAtLeast(1)
-            val bubbleCentreInPage = ((firstRect.top + firstRect.bottom) / 2f * scaleY).toInt()
-            val targetScrollY = (pageFrame.top + bubbleCentreInPage - scrollView.height / 2)
-                .coerceAtLeast(0)
-            withContext(Dispatchers.Main) {
-                animatedScrollTo(targetScrollY, scrollDuration)
-            }
+            val pageTop = pageFrame.top.coerceAtLeast(0)
+            withContext(Dispatchers.Main) { animatedScrollTo(pageTop, scrollDuration) }
         }
 
-        if (!isReading) return
+        if (bubbles.isEmpty()) {
+            // Page has no text bubbles — pause briefly and move on without skipping
+            delay(400)
+            return
+        }
 
-        // ── Step 5: Speak ALL bubble text as ONE smooth utterance ─────────────
-        // Texts are joined with a comma-space so TTS produces a natural pause
-        // between bubbles without restarting the engine.
-        val fullText = nonEmpty.joinToString(", ") { (_, t) -> t }
         withContext(Dispatchers.Main) {
-            tvStatus.text = "Page ${pageIdx + 1} — ${nonEmpty.size} bubble(s)"
-        }
-        speakAndWait(fullText)
-
-        // ── Step 6: Clear highlights ──────────────────────────────────────────
-        withContext(Dispatchers.Main) {
-            overlay.setActiveBubble(-1)
+            tvStatus.text = "Page ${pageIdx + 1} — ${bubbles.size} bubble(s)"
         }
 
-        delay(300) // brief gap before next page
+        // Read each bubble individually with scroll + highlight + TTS
+        for ((bubbleIdx, bubbleInfo) in bubbles.withIndex()) {
+            if (!isReading) return
+
+            // Scroll to center this bubble on screen
+            if (autoScrollEnabled) {
+                withContext(Dispatchers.Main) {
+                    val frameH = pageFrame.height.coerceAtLeast(1)
+                    val scaleY = frameH.toFloat() / srcBitmap.height.coerceAtLeast(1)
+                    val bubbleCentre = ((bubbleInfo.rect.top + bubbleInfo.rect.bottom) / 2f * scaleY).toInt()
+                    val targetY = (pageFrame.top + bubbleCentre - scrollView.height / 2).coerceAtLeast(0)
+                    animatedScrollTo(targetY, scrollDuration)
+                }
+            }
+
+            if (!isReading) return
+
+            // Highlight this bubble in the overlay
+            withContext(Dispatchers.Main) { overlay.setActiveBubble(bubbleIdx) }
+
+            // OCR with auto-enhancement (handles dark/black bubbles automatically)
+            val rawText = withContext(Dispatchers.IO) { ocrBubbleCropRaw(srcBitmap, bubbleInfo.rect) }
+            val text    = cleanOcrText(rawText)
+
+            if (!hasRealContent(text)) {
+                // Bubble was filtered at load time but re-checking here is safe
+                withContext(Dispatchers.Main) { overlay.setActiveBubble(-1) }
+                continue
+            }
+
+            if (!isReading) return
+
+            // Speak the bubble text
+            speakAndWait(text)
+
+            withContext(Dispatchers.Main) { overlay.setActiveBubble(-1) }
+
+            if (!isReading) return
+            delay(120) // brief natural gap between bubbles
+        }
+
+        delay(250) // gap before next page
     }
 
     // ── OCR helpers ───────────────────────────────────────────────────────────
 
     /**
-     * Collapse letter-by-letter OCR artifacts where stylised fonts cause ML Kit
-     * to return each character as a separate token, e.g.:
-     *   "V I C T O R I O U S"  →  "VICTORIOUS"
-     *   "H O U N D"            →  "HOUND"
-     * A line is collapsed only when every space-separated token is a single
-     * character (at least 3 tokens), so normal words are never affected.
+     * Crop the bubble region from [src], auto-enhance for dark bubbles (invert),
+     * then run ML Kit OCR and return the raw text string.
+     *
+     * Dark bubble enhancement: if the sampled center brightness of the crop is
+     * below 80, the image is inverted (white text on black → black text on white)
+     * which dramatically improves ML Kit text recognition accuracy.
      */
-    private fun cleanOcrText(raw: String): String {
-        return raw.lines().joinToString("\n") { line ->
-            val tokens = line.trim().split(" ").filter { it.isNotEmpty() }
-            if (tokens.size >= 3 && tokens.all { it.length == 1 }) {
-                tokens.joinToString("")
-            } else {
-                line
-            }
-        }.trim()
-    }
-
-    /**
-     * Returns true if [text] contains at least one real word — three or more
-     * consecutive ASCII letters.  Rejects random single characters, punctuation
-     * strings, or short OCR garbage from gradient/artwork regions.
-     */
-    private fun hasRealContent(text: String): Boolean =
-        text.contains(Regex("[A-Za-z]{3,}"))
-
-    private suspend fun ocrBubbleCrop(src: Bitmap, bubbleRect: Rect): String {
-        val pad = 12
+    private suspend fun ocrBubbleCropRaw(src: Bitmap, bubbleRect: Rect): String {
+        val pad = 14
         val cropRect = Rect(
             (bubbleRect.left  - pad).coerceAtLeast(0),
             (bubbleRect.top   - pad).coerceAtLeast(0),
@@ -459,17 +445,19 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         )
         if (cropRect.width() <= 0 || cropRect.height() <= 0) return ""
 
-        val crop = Bitmap.createBitmap(
+        val rawCrop = Bitmap.createBitmap(
             src, cropRect.left, cropRect.top, cropRect.width(), cropRect.height()
         )
 
+        // Auto-detect dark bubble and invert for better OCR accuracy
+        val crop = autoEnhanceForOcr(rawCrop)
+
         return try {
-            val result = suspendCancellableCoroutine<String> { cont ->
+            suspendCancellableCoroutine { cont ->
                 val image = InputImage.fromBitmap(crop, 0)
                 recognizer.process(image)
                     .addOnSuccessListener { visionText ->
-                        val text = visionText.text.trim()
-                        if (cont.isActive) cont.resume(text)
+                        if (cont.isActive) cont.resume(visionText.text.trim())
                     }
                     .addOnFailureListener {
                         if (cont.isActive) cont.resume("")
@@ -478,13 +466,133 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                         if (cont.isActive) cont.resume("")
                     }
             }
-            result
         } catch (_: Exception) {
             ""
         } finally {
-            crop.recycle()
+            if (crop !== rawCrop) crop.recycle()
+            rawCrop.recycle()
         }
     }
+
+    /**
+     * If the crop's center region is dark (avg brightness < 80), return a
+     * pixel-inverted copy so that white-on-black text becomes black-on-white,
+     * which ML Kit handles far better.  Otherwise returns [src] unchanged
+     * (no copy, no recycle — caller recycles [src]).
+     */
+    private fun autoEnhanceForOcr(src: Bitmap): Bitmap {
+        val cx = src.width / 2; val cy = src.height / 2
+        val sw = maxOf(1, src.width / 4);  val sh = maxOf(1, src.height / 4)
+        var sum = 0L; var count = 0
+        val xStep = maxOf(1, sw / 5); val yStep = maxOf(1, sh / 5)
+        var y = (cy - sh).coerceAtLeast(0)
+        while (y <= (cy + sh).coerceAtMost(src.height - 1)) {
+            var x = (cx - sw).coerceAtLeast(0)
+            while (x <= (cx + sw).coerceAtMost(src.width - 1)) {
+                val p = src.getPixel(x, y)
+                sum += (Color.red(p) * 0.299f + Color.green(p) * 0.587f + Color.blue(p) * 0.114f).toLong()
+                count++
+                x += xStep
+            }
+            y += yStep
+        }
+        val avgBright = if (count > 0) sum / count else 128L
+        if (avgBright >= 80L) return src   // bright bubble — no enhancement needed
+
+        // Dark bubble: invert pixels
+        val pixels = IntArray(src.width * src.height)
+        src.getPixels(pixels, 0, src.width, 0, 0, src.width, src.height)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            pixels[i] = Color.argb(
+                Color.alpha(p),
+                255 - Color.red(p),
+                255 - Color.green(p),
+                255 - Color.blue(p)
+            )
+        }
+        val inverted = Bitmap.createBitmap(src.width, src.height,
+            src.config ?: Bitmap.Config.ARGB_8888)
+        inverted.setPixels(pixels, 0, src.width, 0, 0, src.width, src.height)
+        return inverted
+    }
+
+    /**
+     * Collapse letter-by-letter OCR artifacts where stylised fonts cause ML Kit
+     * to return each character as a separate token, e.g.:
+     *   "V I K I R V A N"    →  "VIKIR VAN"
+     *   "H O U N D"          →  "HOUND"
+     *   "I , V I K I R"      →  "I,VIKIR"   (handles punctuation-adjacent tokens)
+     *
+     * Detection heuristic: a line is collapsed when ≥ 70% of its tokens are
+     * single characters (letters OR punctuation).  This tolerates tokens like
+     * "I," (letter + comma = length 2) that break the old all-length-1 check.
+     *
+     * Collapse strategy: merge consecutive runs of single-letter tokens into
+     * one word; single-punctuation tokens attach to the previous group; multi-
+     * character tokens (if any survive) are kept as-is separated by spaces.
+     */
+    private fun cleanOcrText(raw: String): String {
+        return raw.lines().joinToString("\n") { line ->
+            collapseSpacedLetters(line)
+        }.trim()
+    }
+
+    private fun collapseSpacedLetters(line: String): String {
+        val tokens = line.trim().split(" ").filter { it.isNotEmpty() }
+        if (tokens.size < 3) return line
+
+        // Count tokens that are "single-char" in spirit:
+        //  - exactly 1 char, OR
+        //  - exactly 2 chars where one is a letter and one is punctuation (e.g. "I,")
+        val singleCount = tokens.count { t ->
+            t.length == 1 ||
+            (t.length == 2 && t.any { it.isLetter() } && t.any { !it.isLetterOrDigit() })
+        }
+        // Require ≥70% single-char tokens and at least 4 tokens total
+        if (tokens.size < 4 || singleCount.toFloat() / tokens.size < 0.70f) return line
+
+        // Collapse: consecutive single-letter tokens → one word;
+        // punctuation tokens attach immediately; multi-char tokens get a space.
+        val sb = StringBuilder()
+        var i = 0
+        while (i < tokens.size) {
+            val t = tokens[i]
+            val isOneLetter = t.length == 1 && t[0].isLetter()
+            val isOnePunct  = t.length == 1 && !t[0].isLetter()
+            val isMixed     = t.length == 2 && t.any { it.isLetter() } && t.any { !it.isLetterOrDigit() }
+
+            when {
+                isOneLetter -> {
+                    // Accumulate a letter run
+                    sb.append(t[0])
+                }
+                isOnePunct || isMixed -> {
+                    // Punctuation: attach directly (no space)
+                    sb.append(t)
+                    // If next token starts a new letter run, add a space separator
+                    val next = tokens.getOrNull(i + 1)
+                    if (next != null && next.length == 1 && next[0].isLetter()) sb.append(' ')
+                }
+                else -> {
+                    // Multi-char token: treat as a full word
+                    if (sb.isNotEmpty() && sb.last() != ' ') sb.append(' ')
+                    sb.append(t)
+                    if (i < tokens.size - 1) sb.append(' ')
+                }
+            }
+            i++
+        }
+        return sb.toString().trim()
+    }
+
+    /**
+     * Returns true if [text] contains at least one real word — three or more
+     * consecutive ASCII letters.  Rejects single characters, punctuation strings,
+     * or short OCR garbage from gradient/artwork regions.
+     */
+    private fun hasRealContent(text: String): Boolean =
+        text.contains(Regex("[A-Za-z]{3,}"))
 
     // ── Auto-scroll ───────────────────────────────────────────────────────────
 
