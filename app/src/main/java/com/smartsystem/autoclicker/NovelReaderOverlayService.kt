@@ -58,6 +58,7 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
     private val paragraphs = mutableListOf<String>()
     private var currentPara = 0
     private var isReading = false
+    private var tagalogMode = false
 
     override fun onCreate() {
         super.onCreate()
@@ -73,6 +74,7 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
         }
         val uriString = intent?.getStringExtra(EXTRA_FILE_URI)
         val startPara = intent?.getIntExtra(EXTRA_START_PARA, 0) ?: 0
+        tagalogMode = intent?.getBooleanExtra(EXTRA_TAGALOG, false) ?: false
         if (uriString != null) {
             loadFile(Uri.parse(uriString), startPara)
         }
@@ -164,8 +166,32 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
             }
             val paras = withContext(Dispatchers.Default) { NovelParser.parseParagraphs(rawText) }
             paragraphs.clear(); paragraphs.addAll(paras)
+
+            if (tagalogMode) {
+                binding.tvOverlayParagraph.text = "Tina-translate…"
+                val ready = withContext(Dispatchers.IO) { NovelTranslator.ensureModelReady() }
+                if (ready) {
+                    for (i in paragraphs.indices) {
+                        val t = withContext(Dispatchers.IO) { NovelTranslator.translate(paragraphs[i]) }
+                        if (t != null) paragraphs[i] = t
+                    }
+                    tts?.language = resolveTagalogLocale()
+                }
+            }
+
             currentPara = startPara.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
             updateParagraphView()
+        }
+    }
+
+    private fun resolveTagalogLocale(): Locale {
+        val fil = Locale("fil", "PH")
+        val tl = Locale("tl", "PH")
+        val t = tts ?: return Locale.ENGLISH
+        return when {
+            t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> fil
+            t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> tl
+            else -> Locale.ENGLISH
         }
     }
 
@@ -274,5 +300,6 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
         const val ACTION_STOP = "com.smartsystem.autoclicker.NOVEL_OVERLAY_STOP"
         const val EXTRA_FILE_URI = "extra_file_uri"
         const val EXTRA_START_PARA = "extra_start_para"
+        const val EXTRA_TAGALOG = "extra_tagalog"
     }
 }
