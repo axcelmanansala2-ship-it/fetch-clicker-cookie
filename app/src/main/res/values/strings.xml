@@ -53,9 +53,10 @@
     <string name="btn_get_sso">Get from Cookies</string>
     <string name="btn_sso_key">🔑 SSO Key Watcher</string>
 
-    <!-- Manhwa Reader -->
-    <string name="btn_manhwa_reader">📖 Open Manhwa Reader</string>
-    <string name="manhwa_no_text">No text detected — scroll manually</string>
-    <string name="manhwa_reading">Reading panel…</string>
-    <string name="manhwa_done">Done reading!</string>
+    <!-- Novel Reader -->
+    <string name="btn_novel_reader">📖 Open Novel Reader</string>
+    <string name="novel_loading">Loading file…</string>
+    <string name="novel_reading">Reading…</string>
+    <string name="novel_done">Done reading ✓</string>
+    <string name="novel_no_file">Open a .txt or .epub file to begin</string>
 </resources>
