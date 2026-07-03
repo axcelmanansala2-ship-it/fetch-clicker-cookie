@@ -47,8 +47,9 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnSsoKey.setOnClickListener { toggleSsoService() }
 
+        // Open Novel Reader (was Manhwa Reader)
         binding.btnManhwaReader.setOnClickListener {
-            startActivity(Intent(this, ManhwaReaderActivity::class.java))
+            startActivity(Intent(this, NovelReaderActivity::class.java))
         }
     }
 
