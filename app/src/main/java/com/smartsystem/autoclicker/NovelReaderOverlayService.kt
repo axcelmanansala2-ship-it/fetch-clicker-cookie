@@ -184,23 +184,46 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    /** Picks an actual installed Filipino/Tagalog TTS voice so playback is understandable, not just text label switching. */
+    /**
+     * Switches TTS to an actual Filipino/Tagalog voice (mirrors NovelReaderActivity's fix).
+     * Prefers `setLanguage()` — Android's engine resolves the correct voice for that locale —
+     * over manually filtering `tts.voices`, since a language can be *listed* in system Settings
+     * without its voice data actually being downloaded on-device.
+     */
     private fun applyTagalogVoice() {
         val t = tts ?: return
-        val allVoices = t.voices ?: emptySet()
-        val filVoice = allVoices.firstOrNull { it.locale.language == "fil" }
-            ?: allVoices.firstOrNull { it.locale.language == "tl" }
-            ?: allVoices.firstOrNull { it.locale.country == "PH" && it.locale.language != "en" }
-        if (filVoice != null) {
-            t.voice = filVoice
-        } else {
-            val fil = Locale("fil", "PH")
-            val tl = Locale("tl", "PH")
-            when {
-                t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> t.language = fil
-                t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> t.language = tl
+        val fil = Locale("fil", "PH")
+        val tl = Locale("tl", "PH")
+        var result = t.setLanguage(fil)
+        if (result < TextToSpeech.LANG_AVAILABLE) result = t.setLanguage(tl)
+
+        when (result) {
+            TextToSpeech.LANG_MISSING_DATA -> {
+                Toast.makeText(
+                    this,
+                    "Kulang ang Tagalog voice data ng TTS engine — bubuksan ang download screen",
+                    Toast.LENGTH_LONG
+                ).show()
+                try {
+                    startActivity(Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (_: Exception) {}
+                return
+            }
+            TextToSpeech.LANG_NOT_SUPPORTED -> {
+                Toast.makeText(
+                    this,
+                    "Walang Tagalog voice sa TTS engine mo — palitan ang \"Preferred engine\" sa Settings > Text-to-speech",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
             }
         }
+
+        val allVoices = t.voices ?: emptySet()
+        val betterVoice = allVoices.firstOrNull {
+            it.locale.language in setOf("fil", "tl") && !it.isNetworkConnectionRequired
+        } ?: allVoices.firstOrNull { it.locale.language in setOf("fil", "tl") }
+        if (betterVoice != null) t.voice = betterVoice
     }
 
     private fun updateParagraphView() {
