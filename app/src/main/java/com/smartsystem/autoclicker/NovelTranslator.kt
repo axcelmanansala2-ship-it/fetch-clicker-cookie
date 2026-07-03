@@ -276,7 +276,7 @@ object NovelTranslator {
         var cursor = 0
         var anySuccess = false
 
-        fun appendTranslated(chunk: String) {
+        suspend fun appendTranslated(chunk: String) {
             if (chunk.isBlank()) {
                 sb.append(chunk)
             } else {
