@@ -761,7 +761,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 Color.colorToHSV(bmp.getPixel(rr, py), hsv); vals += hsv[2]; py += s }
             if (vals.size < 4) return null
             val m = vals.average().toFloat()
-            return Pair(m, (vals.sumOf { vi -> (vi - m) * (vi - m) } / vals.size).toFloat())
+            return Pair(m, (vals.sumOf { vi -> ((vi - m) * (vi - m)).toDouble() } / vals.size).toFloat())
         }
 
         // ── Step 2a: Boundary detection via near ring ───────────────────────
