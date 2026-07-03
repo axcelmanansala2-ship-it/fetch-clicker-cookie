@@ -455,18 +455,22 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // ── Auto-scroll ───────────────────────────────────────────────────────────
 
     private suspend fun animatedScrollTo(targetY: Int, durationMs: Long): Unit =
-        suspendCoroutine { cont ->
+        suspendCancellableCoroutine { cont ->
             val startY = scrollView.scrollY
-            if (startY == targetY) { cont.resume(Unit); return@suspendCoroutine }
+            if (startY == targetY) { cont.resume(Unit); return@suspendCancellableCoroutine }
+            val resumed = AtomicBoolean(false)
+            fun finishOnce() { if (resumed.compareAndSet(false, true)) cont.resume(Unit) }
+
             val anim = ValueAnimator.ofInt(startY, targetY).apply {
                 duration = durationMs
                 interpolator = android.view.animation.DecelerateInterpolator()
                 addUpdateListener { scrollView.scrollTo(0, it.animatedValue as Int) }
                 addListener(object : AnimatorListenerAdapter() {
-                    override fun onAnimationEnd(a: Animator)    { cont.resume(Unit) }
-                    override fun onAnimationCancel(a: Animator) { cont.resume(Unit) }
+                    override fun onAnimationEnd(a: Animator)    { finishOnce() }
+                    override fun onAnimationCancel(a: Animator) { finishOnce() }
                 })
             }
+            cont.invokeOnCancellation { anim.cancel() }
             scrollView.post { anim.start() }
         }
 
