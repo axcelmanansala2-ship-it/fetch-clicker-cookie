@@ -137,8 +137,9 @@ object BubbleDetector {
 
             // ── Filter 1: area ────────────────────────────────────────────────
             if (area < MIN_AREA || area > maxArea) continue
-            val bw = (maxX - minX).coerceAtLeast(1)
-            val bh = (maxY - minY).coerceAtLeast(1)
+            // +1 for inclusive → exclusive bbox (matches Android Rect convention)
+            val bw = (maxX - minX + 1).coerceAtLeast(1)
+            val bh = (maxY - minY + 1).coerceAtLeast(1)
             if (bw < MIN_DIM || bh < MIN_DIM) continue
 
             // ── Filter 2: aspect ratio ────────────────────────────────────────
@@ -152,8 +153,8 @@ object BubbleDetector {
             // ── Filter 4: interior brightness (dark-page false-positive guard) ─
             // Sample the center 50% of the bounding box. Real speech bubbles are
             // bright white inside; dark action panels fail even if "enclosed".
-            val smX = minX + bw / 4; val emX = maxX - bw / 4
-            val smY = minY + bh / 4; val emY = maxY - bh / 4
+            val smX = minX + bw / 4; val emX = (maxX + 1) - bw / 4
+            val smY = minY + bh / 4; val emY = (maxY + 1) - bh / 4
             val xStep = maxOf(1, (emX - smX) / 12)
             val yStep = maxOf(1, (emY - smY) / 12)
             var brightSum = 0L; var sampleCount = 0
@@ -178,9 +179,12 @@ object BubbleDetector {
             // ── Build outline from boundary pixels sorted by angle ─────────────
             val outline = buildOutline(boundaryPx, ww, invScale)
 
+            // right/bottom are exclusive (Android Rect convention): use max+1
             val rect = Rect(
-                (minX * invScale).toInt(), (minY * invScale).toInt(),
-                (maxX * invScale).toInt(), (maxY * invScale).toInt()
+                (minX * invScale).toInt(),
+                (minY * invScale).toInt(),
+                ((maxX + 1) * invScale).toInt().coerceAtMost(srcW),
+                ((maxY + 1) * invScale).toInt().coerceAtMost(srcH)
             )
             results.add(BubbleInfo(rect, outline))
         }
