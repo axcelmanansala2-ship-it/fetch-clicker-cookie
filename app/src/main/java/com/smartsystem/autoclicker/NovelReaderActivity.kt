@@ -87,6 +87,13 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var fontSize      = 17f
     private var currentFileUri: Uri? = null
 
+    // ── Tagalog translation ──────────────────────────────────────────────────
+    private val originalParagraphs = mutableListOf<String>()
+    private val translatedCache = HashMap<Int, String>()
+    private var isTagalogMode = false
+    private var translateInProgress = false
+    private lateinit var btnTagalog: TextView
+
     // ═════════════════════════════════════════════════════════════════════════
     // Lifecycle
     // ═════════════════════════════════════════════════════════════════════════
@@ -165,6 +172,21 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             it.marginEnd = dp(52).toInt()
         }
 
+        btnTagalog = TextView(this).apply {
+            text = "🇵🇭"
+            textSize = 17f
+            gravity = Gravity.CENTER
+            setTextColor(C_MUTED)
+            isClickable = true; isFocusable = true
+            foreground = rippleFg()
+            setOnClickListener { toggleTagalogMode() }
+        }
+        btnTagalog.layoutParams = RelativeLayout.LayoutParams(dp(44).toInt(), dp(44).toInt()).also {
+            it.addRule(RelativeLayout.CENTER_VERTICAL)
+            it.addRule(RelativeLayout.ALIGN_PARENT_END)
+            it.marginEnd = dp(98).toInt()
+        }
+
         val gear = iconBtn(android.R.drawable.ic_menu_preferences, C_MUTED).apply {
             setOnClickListener { showSettings() }
         }
@@ -174,7 +196,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             it.marginEnd = dp(6).toInt()
         }
 
-        bar.addView(back); bar.addView(tvTitle); bar.addView(floatBtn); bar.addView(gear)
+        bar.addView(back); bar.addView(tvTitle); bar.addView(btnTagalog); bar.addView(floatBtn); bar.addView(gear)
         return bar
     }
 
@@ -372,9 +394,87 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         val svcIntent = Intent(this, NovelReaderOverlayService::class.java).apply {
             putExtra(NovelReaderOverlayService.EXTRA_FILE_URI, uri.toString())
             putExtra(NovelReaderOverlayService.EXTRA_START_PARA, currentPara)
+            putExtra(NovelReaderOverlayService.EXTRA_TAGALOG, isTagalogMode)
         }
         ContextCompat.startForegroundService(this, svcIntent)
         moveTaskToBack(true)
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════
+    // Tagalog auto-translate
+    // ═════════════════════════════════════════════════════════════════════════
+
+    private fun toggleTagalogMode() {
+        if (translateInProgress) return
+        if (paragraphs.isEmpty() && originalParagraphs.isEmpty()) {
+            Toast.makeText(this, "Open a file first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (isTagalogMode) restoreOriginalParagraphs() else translateToTagalog()
+    }
+
+    private fun translateToTagalog() {
+        val wasReading = isReading
+        if (wasReading) pauseReading()
+        translateInProgress = true
+        tvStatus.text = "Ini-hahanda ang Tagalog…"
+
+        lifecycleScope.launch {
+            val ready = withContext(Dispatchers.IO) { NovelTranslator.ensureModelReady() }
+            if (!ready) {
+                translateInProgress = false
+                tvStatus.text = "Hindi ma-download ang Tagalog model — check internet"
+                Toast.makeText(
+                    this@NovelReaderActivity,
+                    "Kailangan ng internet minsan lang para i-download ang Tagalog model",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@launch
+            }
+
+            val total = originalParagraphs.size
+            for (i in originalParagraphs.indices) {
+                val translated = translatedCache[i] ?: withContext(Dispatchers.IO) {
+                    NovelTranslator.translate(originalParagraphs[i])
+                } ?: originalParagraphs[i]
+                translatedCache[i] = translated
+                if (i < paragraphs.size) paragraphs[i] = translated
+                paraViews.getOrNull(i)?.text = translated
+                if (i % 5 == 0 || i == total - 1) {
+                    tvStatus.text = "Tina-translate… ${i + 1}/$total"
+                }
+            }
+
+            isTagalogMode = true
+            tts?.language = resolveTagalogLocale()
+            tvStatus.text = "🇵🇭 Tagalog mode — ${paragraphs.size} paragraphs"
+            btnTagalog.setTextColor(C_ACCENT)
+            translateInProgress = false
+            if (wasReading) startReading()
+        }
+    }
+
+    private fun restoreOriginalParagraphs() {
+        val wasReading = isReading
+        if (wasReading) pauseReading()
+        paragraphs.clear(); paragraphs.addAll(originalParagraphs)
+        paraViews.forEachIndexed { i, tv -> tv.text = paragraphs.getOrElse(i) { "" } }
+        isTagalogMode = false
+        tts?.language = Locale.ENGLISH
+        tvStatus.text = "English mode — ${paragraphs.size} paragraphs"
+        btnTagalog.setTextColor(C_MUTED)
+        if (wasReading) startReading()
+    }
+
+    private fun resolveTagalogLocale(): Locale {
+        val fil = Locale("fil", "PH")
+        val tl = Locale("tl", "PH")
+        val t = tts ?: return Locale.ENGLISH
+        return when {
+            t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> fil
+            t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> tl
+            else -> Locale.ENGLISH
+        }
     }
 
     private fun readContent(uri: Uri): String? {
@@ -457,12 +557,16 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
              || (t.uppercase() == t && t.length < 40 && t.contains(Regex("[A-Z]"))))
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═════���═══════════════════════════════════════════════════════════════════
     // Display
     // ═════════════════════════════════════════════════════════════════════════
 
     private fun displayParagraphs(paras: List<String>) {
         paragraphs.clear(); paragraphs.addAll(paras)
+        originalParagraphs.clear(); originalParagraphs.addAll(paras)
+        translatedCache.clear()
+        isTagalogMode = false
+        if (::btnTagalog.isInitialized) btnTagalog.setTextColor(C_MUTED)
         paraViews.clear(); paraContainer.removeAllViews()
 
         for (para in paras) {
@@ -517,7 +621,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         it.setBackgroundColor(Color.TRANSPARENT)
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ══��══════════════════════════════════════════════════════════════════════
     // Playback controls
     // ═════════════════════════════════════════════════════════════════════════
 
