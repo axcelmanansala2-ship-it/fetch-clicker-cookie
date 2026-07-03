@@ -532,64 +532,154 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
      * one word; single-punctuation tokens attach to the previous group; multi-
      * character tokens (if any survive) are kept as-is separated by spaces.
      */
+    /**
+     * Clean raw ML Kit OCR output into natural, speakable text.
+     *
+     * Handles all common manhwa font OCR artifacts in order:
+     *  1. Char-per-line  — ML Kit returns "V\nI\nK\nI\nR" → collapsed to "VIKIR"
+     *  2. Space-per-char — "V I K I R" on one line → "VIKIR"
+     *  3. Stutter        — "f-find", "a-ahh", "w-wait" → "find", "ahh", "wait"
+     *  4. Ellipsis       — "...", "…" → removed (not read aloud)
+     *  5. Lone letters   — any remaining isolated single chars stripped from output
+     *
+     * hasRealContent() is the final gate: text with no real word is discarded.
+     */
     private fun cleanOcrText(raw: String): String {
-        return raw.lines().joinToString("\n") { line ->
-            collapseSpacedLetters(line)
-        }.trim()
+        if (raw.isBlank()) return ""
+
+        val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        if (lines.isEmpty()) return ""
+
+        // ── Step 1: Detect char-per-line (one glyph per line from stylised fonts) ──
+        // e.g. ML Kit returns "V\nI\nK\nI\nR" instead of "VIKIR"
+        val letterLineCount = lines.count { it.length == 1 && it[0].isLetter() }
+        val processedLines: List<String> =
+            if (lines.size >= 3 && letterLineCount.toFloat() / lines.size >= 0.55f) {
+                // Entire text is char-per-line → collapse all into words
+                listOf(collapseCharLines(lines))
+            } else {
+                // Normal text → try per-line space-collapse ("V I K I R" → "VIKIR")
+                lines.map { collapseSpacedLetters(it) }
+            }
+
+        // ── Step 2: Join lines, clean up TTS-unfriendly artifacts ───────────────
+        val joined  = processedLines.filter { it.isNotBlank() }.joinToString(" ")
+        val cleaned = cleanupOcrArtifacts(joined)
+
+        // ── Step 3: Strip remaining lone single letters ───────────────────────────
+        // After all collapsing a leftover "V" or "I" token is never valid speech.
+        val finalTokens = cleaned.split(Regex("\\s+")).filter { token ->
+            token.isNotEmpty() &&
+            !(token.length == 1 && token[0].isLetter())   // drop lone letter tokens
+        }
+        return finalTokens.joinToString(" ").trim()
     }
 
+    /**
+     * Collapse one-letter-per-line runs into words.
+     *
+     *   ["V","I","K","I","R"]      → "VIKIR"
+     *   ["N","O","NEED","T","O"]   → "NO NEED TO"
+     *   ["V","I","K","I","R","!"]  → "VIKIR!"
+     *
+     * Multi-char lines are treated as full words and passed through
+     * [collapseSpacedLetters] for a second-pass space-collapse.
+     */
+    private fun collapseCharLines(lines: List<String>): String {
+        val words      = mutableListOf<String>()
+        val currentRun = StringBuilder()
+
+        fun flushRun() {
+            if (currentRun.isNotEmpty()) {
+                words.add(currentRun.toString())
+                currentRun.clear()
+            }
+        }
+
+        for (line in lines) {
+            when {
+                line.length == 1 && line[0].isLetter() ->
+                    // Single letter: add to running word
+                    currentRun.append(line[0])
+
+                line.length == 1 && !line[0].isLetter() -> {
+                    // Single punctuation: attach to current run, then flush
+                    if (currentRun.isNotEmpty()) {
+                        currentRun.append(line[0])
+                        flushRun()
+                    }
+                    // lone punctuation with no preceding run → skip
+                }
+
+                else -> {
+                    // Multi-char line: flush any pending run, add line as word
+                    flushRun()
+                    val collapsed = collapseSpacedLetters(line)
+                    if (collapsed.isNotBlank()) words.add(collapsed)
+                }
+            }
+        }
+        flushRun()
+        return words.joinToString(" ")
+    }
+
+    /**
+     * Collapse space-separated single letters on ONE line: "V I K I R" → "VIKIR".
+     *
+     * Triggers when ≥55% of tokens are single-char (length 1, or length-2 mixed
+     * letter+punctuation like "I,") and there are ≥3 tokens.
+     */
     private fun collapseSpacedLetters(line: String): String {
         val tokens = line.trim().split(" ").filter { it.isNotEmpty() }
         if (tokens.size < 3) return line
 
-        // Count tokens that are "single-char" in spirit:
-        //  - exactly 1 char, OR
-        //  - exactly 2 chars where one is a letter and one is punctuation (e.g. "I,")
         val singleCount = tokens.count { t ->
             t.length == 1 ||
             (t.length == 2 && t.any { it.isLetter() } && t.any { !it.isLetterOrDigit() })
         }
-        // Require ≥70% single-char tokens and at least 4 tokens total
-        if (tokens.size < 4 || singleCount.toFloat() / tokens.size < 0.70f) return line
+        if (singleCount.toFloat() / tokens.size < 0.55f) return line
 
-        // Collapse: consecutive single-letter tokens → one word;
-        // punctuation tokens attach immediately; multi-char tokens get a space.
         val sb = StringBuilder()
-        var i = 0
-        while (i < tokens.size) {
-            val t = tokens[i]
+        for (t in tokens) {
             val isOneLetter = t.length == 1 && t[0].isLetter()
             val isOnePunct  = t.length == 1 && !t[0].isLetter()
-            val isMixed     = t.length == 2 && t.any { it.isLetter() } && t.any { !it.isLetterOrDigit() }
-
+            val isMixed     = t.length == 2 &&
+                t.any { it.isLetter() } && t.any { !it.isLetterOrDigit() }
             when {
-                isOneLetter -> {
-                    // Accumulate a letter run
-                    sb.append(t[0])
-                }
-                isOnePunct || isMixed -> {
-                    // Punctuation: attach directly (no space)
-                    sb.append(t)
-                    // If next token starts a new letter run, add a space separator
-                    val next = tokens.getOrNull(i + 1)
-                    if (next != null && next.length == 1 && next[0].isLetter()) sb.append(' ')
-                }
-                else -> {
-                    // Multi-char token: treat as a full word
+                isOneLetter -> sb.append(t[0])          // merge into letter run
+                isOnePunct  -> sb.append(t[0])          // attach punctuation directly
+                isMixed     -> sb.append(t)             // "I," → attach as-is
+                else        -> {                        // full word
                     if (sb.isNotEmpty() && sb.last() != ' ') sb.append(' ')
-                    sb.append(t)
-                    if (i < tokens.size - 1) sb.append(' ')
+                    sb.append(t).append(' ')
                 }
             }
-            i++
         }
         return sb.toString().trim()
     }
 
     /**
-     * Returns true if [text] contains at least one real word — three or more
-     * consecutive ASCII letters.  Rejects single characters, punctuation strings,
-     * or short OCR garbage from gradient/artwork regions.
+     * Remove OCR artifacts that are unpleasant or meaningless when spoken aloud:
+     *   • Stutter  — "f-find" → "find",  "w-wait" → "wait",  "a-ahh" → "ahh"
+     *   • Ellipsis — "..." / ".…" / "…" → removed (TTS says "dot dot dot" otherwise)
+     *   • Line-break noise and multiple spaces → single space
+     */
+    private fun cleanupOcrArtifacts(text: String): String {
+        var s = text
+        // Stutter: single letter + hyphen + word (keep the word, drop the stutter)
+        s = s.replace(Regex("""(?i)\b[a-z]-([a-z]{2,})\b"""), "$1")
+        // Any run of 2+ dots or Unicode ellipsis → nothing
+        s = s.replace(Regex("""[.…]{2,}"""), "")
+        // Normalise line breaks and excess whitespace
+        s = s.replace(Regex("""[\n\r]+"""), " ")
+        s = s.replace(Regex("""\s{2,}"""), " ")
+        return s.trim()
+    }
+
+    /**
+     * Returns true only when [text] contains at least one real word
+     * (three or more consecutive ASCII letters).
+     * Rejects lone chars, punctuation strings, and short OCR noise from artwork.
      */
     private fun hasRealContent(text: String): Boolean =
         text.contains(Regex("[A-Za-z]{3,}"))
