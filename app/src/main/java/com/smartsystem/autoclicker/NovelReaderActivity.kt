@@ -1024,16 +1024,23 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         inner.addView(sectionLabel("SCROLL SPEED"))
         val scrollGroup = radioGroup(scrollLabels, sc, 300); inner.addView(scrollGroup)
 
-        // Voice spinner
-        val voices = tts?.voices?.filter { it.locale.language == "en" }
-            ?.sortedWith(compareBy({ it.locale.country }, { it.name })) ?: emptyList()
+        // Voice spinner — include English AND any installed Filipino/Tagalog voices so the user
+        // can see/pick a Tagalog voice here too, not just via the auto Tagalog-mode switch.
+        val voices = tts?.voices?.filter {
+            it.locale.language == "en" || it.locale.language == "fil" || it.locale.language == "tl"
+        }?.sortedWith(compareBy(
+            { it.locale.language != "fil" && it.locale.language != "tl" },
+            { it.locale.country }, { it.name }
+        )) ?: emptyList()
         var voiceSpin: Spinner? = null
         if (voices.isNotEmpty()) {
             inner.addView(sectionLabel("VOICE"))
             val names = voices.map { v ->
-                val flag = when (v.locale.country) {
-                    "US" -> "🇺🇸" ; "GB" -> "🇬🇧" ; "AU" -> "🇦🇺"
-                    "IN" -> "🇮🇳" ; "CA" -> "🇨🇦" ; else -> "🌐"
+                val flag = when {
+                    v.locale.language == "fil" || v.locale.language == "tl" -> "🇵🇭"
+                    v.locale.country == "US" -> "🇺🇸" ; v.locale.country == "GB" -> "🇬🇧"
+                    v.locale.country == "AU" -> "🇦🇺" ; v.locale.country == "IN" -> "🇮🇳"
+                    v.locale.country == "CA" -> "🇨🇦" ; else -> "🌐"
                 }
                 "$flag  ${v.name.replace(Regex("[-_]"), " ")}"
             }
