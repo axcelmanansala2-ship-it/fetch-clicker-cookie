@@ -355,16 +355,20 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
         val ocrResults = bubbles.mapIndexed { idx, bubbleInfo ->
             if (!isReading) return
-            val text = withContext(Dispatchers.IO) {
+            val rawText = withContext(Dispatchers.IO) {
                 ocrBubbleCrop(srcBitmap, bubbleInfo.rect)
             }
-            idx to text.trim()
+            // Collapse "V I C T O R I O U S" → "VICTORIOUS" from letter-by-letter OCR
+            val text = cleanOcrText(rawText)
+            idx to text
         }
 
         if (!isReading) return
 
-        // ── Step 2: Collect non-empty texts ───────────────────────────────────
-        val nonEmpty = ocrResults.filter { (_, t) -> t.isNotBlank() }
+        // ── Step 2: Collect bubbles with real text (≥3 consecutive letters) ───
+        // hasRealContent rejects single chars, punctuation, and OCR garbage from
+        // gradient/artwork regions that contain no actual speech text.
+        val nonEmpty = ocrResults.filter { (_, t) -> hasRealContent(t) }
         if (nonEmpty.isEmpty()) {
             delay(200)
             return
@@ -417,6 +421,33 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     }
 
     // ── OCR helpers ───────────────────────────────────────────────────────────
+
+    /**
+     * Collapse letter-by-letter OCR artifacts where stylised fonts cause ML Kit
+     * to return each character as a separate token, e.g.:
+     *   "V I C T O R I O U S"  →  "VICTORIOUS"
+     *   "H O U N D"            →  "HOUND"
+     * A line is collapsed only when every space-separated token is a single
+     * character (at least 3 tokens), so normal words are never affected.
+     */
+    private fun cleanOcrText(raw: String): String {
+        return raw.lines().joinToString("\n") { line ->
+            val tokens = line.trim().split(" ").filter { it.isNotEmpty() }
+            if (tokens.size >= 3 && tokens.all { it.length == 1 }) {
+                tokens.joinToString("")
+            } else {
+                line
+            }
+        }.trim()
+    }
+
+    /**
+     * Returns true if [text] contains at least one real word — three or more
+     * consecutive ASCII letters.  Rejects random single characters, punctuation
+     * strings, or short OCR garbage from gradient/artwork regions.
+     */
+    private fun hasRealContent(text: String): Boolean =
+        text.contains(Regex("[A-Za-z]{3,}"))
 
     private suspend fun ocrBubbleCrop(src: Bitmap, bubbleRect: Rect): String {
         val pad = 12
