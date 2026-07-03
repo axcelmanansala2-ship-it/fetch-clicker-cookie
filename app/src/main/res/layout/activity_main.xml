@@ -193,23 +193,23 @@
             android:textStyle="bold"
             android:layout_marginBottom="24dp" />
 
-        <!-- MANHWA READER SECTION -->
+        <!-- NOVEL READER SECTION -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MANHWA READER"
-            android:textColor="@color/colorManhwaAccent"
+            android:text="NOVEL READER"
+            android:textColor="@color/colorNovelAccent"
             android:textSize="11sp"
             android:textStyle="bold"
             android:letterSpacing="0.1"
             android:layout_marginBottom="8dp" />
 
         <Button
-            android:id="@+id/btnManhwaReader"
+            android:id="@+id/btnNovelReader"
             android:layout_width="match_parent"
             android:layout_height="52dp"
-            android:text="@string/btn_manhwa_reader"
-            android:backgroundTint="@color/colorManhwaAccent"
+            android:text="@string/btn_novel_reader"
+            android:backgroundTint="@color/colorNovelAccent"
             android:textColor="@color/colorPrimary"
             android:textSize="15sp"
             android:textStyle="bold" />
