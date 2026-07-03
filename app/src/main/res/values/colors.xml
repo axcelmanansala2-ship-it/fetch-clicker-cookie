@@ -25,4 +25,7 @@
     <color name="colorNovelHeading">#BBA9FF</color>
     <color name="colorNovelMuted">#8888A0</color>
     <color name="colorNovelHighlight">#1F1A40</color>
+
+    <!-- Manhwa Reader -->
+    <color name="colorManhwaAccent">#FF6B9D</color>
 </resources>
