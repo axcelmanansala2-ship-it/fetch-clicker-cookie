@@ -175,7 +175,7 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
                         val t = withContext(Dispatchers.IO) { NovelTranslator.translate(paragraphs[i]) }
                         if (t != null) paragraphs[i] = t
                     }
-                    tts?.language = resolveTagalogLocale()
+                    applyTagalogVoice()
                 }
             }
 
@@ -184,14 +184,22 @@ class NovelReaderOverlayService : Service(), TextToSpeech.OnInitListener {
         }
     }
 
-    private fun resolveTagalogLocale(): Locale {
-        val fil = Locale("fil", "PH")
-        val tl = Locale("tl", "PH")
-        val t = tts ?: return Locale.ENGLISH
-        return when {
-            t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> fil
-            t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> tl
-            else -> Locale.ENGLISH
+    /** Picks an actual installed Filipino/Tagalog TTS voice so playback is understandable, not just text label switching. */
+    private fun applyTagalogVoice() {
+        val t = tts ?: return
+        val allVoices = t.voices ?: emptySet()
+        val filVoice = allVoices.firstOrNull { it.locale.language == "fil" }
+            ?: allVoices.firstOrNull { it.locale.language == "tl" }
+            ?: allVoices.firstOrNull { it.locale.country == "PH" && it.locale.language != "en" }
+        if (filVoice != null) {
+            t.voice = filVoice
+        } else {
+            val fil = Locale("fil", "PH")
+            val tl = Locale("tl", "PH")
+            when {
+                t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> t.language = fil
+                t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> t.language = tl
+            }
         }
     }
 
