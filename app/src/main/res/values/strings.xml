@@ -59,7 +59,4 @@
     <string name="novel_reading">Reading…</string>
     <string name="novel_done">Done reading ✓</string>
     <string name="novel_no_file">Open a .txt or .epub file to begin</string>
-
-    <!-- Manhwa Reader -->
-    <string name="btn_manhwa_reader">📚 Open Manhwa Reader</string>
 </resources>
