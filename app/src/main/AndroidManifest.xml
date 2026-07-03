@@ -42,38 +42,43 @@
             android:windowSoftInputMode="adjustResize"
             android:parentActivityName=".MainActivity" />
 
-        <!-- Manhwa Reader — hardware accelerated for smooth scrolling -->
+        <!-- Novel Reader — opens .txt and .epub files shared from file managers -->
         <activity
-            android:name=".ManhwaReaderActivity"
+            android:name=".NovelReaderActivity"
             android:exported="true"
-            android:label="Manhwa Reader"
+            android:label="Novel Reader"
             android:hardwareAccelerated="true"
             android:parentActivityName=".MainActivity">
+            <!-- Open .txt files directly -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- Share .txt files from other apps -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="image/*" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
+            <!-- Open .epub files -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/epub+zip" />
             </intent-filter>
+            <!-- Share .epub files -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <data android:mimeType="application/pdf" />
+                <data android:mimeType="application/epub+zip" />
             </intent-filter>
+            <!-- Fallback: files with no recognised MIME (common with file managers) -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="file" android:mimeType="application/pdf" />
+                <data android:scheme="file" android:mimeType="*/*" />
             </intent-filter>
         </activity>
 
@@ -85,30 +90,30 @@
         </service>
 
         <service
-            android:name=".AccountCheckerService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="overlay" />
-        </service>
-
-        <service
-            android:name=".SsoKeyService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse">
-            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="overlay" />
-        </service>
-
-        <service
             android:name=".AutoClickAccessibilityService"
             android:exported="true"
-            android:label="@string/accessibility_service_label"
-            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:label="@string/accessibility_service_label">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <service
+            android:name=".AccountCheckerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="checker" />
+        </service>
+
+        <service
+            android:name=".SsoKeyService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="sso" />
         </service>
 
     </application>
