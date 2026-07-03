@@ -677,45 +677,89 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun isInsideBubble(bmp: Bitmap, box: Rect): Boolean {
         if (box.isEmpty) return true
 
-        // Single-ring edge variance check.
+        // ── Interior bimodal brightness check ──────────────────────────────
         //
-        // Sample pixels along the expanded perimeter of the text block's bounding box
-        // and measure brightness (HSV Value) variance.
-        //   • Inside a bubble (any shape — oval, spiky, cloud, rectangular):
-        //     the fill is a flat colour → sampled pixels are near-uniform → LOW variance
-        //   • SFX / artwork text floating on the illustrated scene:
-        //     background pixels are part of the coloured artwork → HIGH variance
+        // Any speech bubble or text box — oval, spiky, cloud, rectangular,
+        // custom shape, any colour, any size — places text on a SOLID-FILL
+        // background. That solid fill creates a strongly BIMODAL brightness
+        // distribution inside the bounding box:
         //
-        // A two-ring approach was attempted (inner 10 px + outer 28 px) but it caused
-        // false negatives on burst/spiky bubbles: the narrow spike tips mean the outer
-        // ring exits the bubble at the spikes, sampling artwork pixels → high variance →
-        // real dialogue incorrectly rejected. Staying at a single 10 px ring keeps
-        // sampling inside every bubble shape. SFX filtering is handled separately by
-        // looksLikeSfxText() using character-density heuristics.
-        val pad = 10
-        val l = (box.left   - pad).coerceAtLeast(0)
-        val t = (box.top    - pad).coerceAtLeast(0)
-        val r = (box.right  + pad).coerceAtMost(bmp.width  - 1)
-        val b = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+        //   White bubble + dark text → most pixels are very bright (fill)
+        //                              or very dark (letters) — few in-between
+        //   Dark narration box + white text → opposite poles, same bimodality
+        //   Coloured fill bubble → the fill cluster is uniform in mid-range
+        //
+        // Artwork / SFX text has NO solid fill: pixels span a continuous range
+        // of intermediate brightness values (skin tones, sky, clothes, gradients).
+        //
+        // This is shape-agnostic and size-agnostic — it only looks at the
+        // PIXEL CONTENT inside the box, never at a fixed external ring that
+        // can exit through spike tips or narrow bubble margins.
 
-        if (l >= r || t >= b) return true   // degenerate box — give benefit of doubt
-
-        val samples = mutableListOf<Int>()
-        val step = 10
-        var x = l; while (x <= r) { samples += bmp.getPixel(x, t); samples += bmp.getPixel(x, b); x += step }
-        var y = t; while (y <= b) { samples += bmp.getPixel(l, y); samples += bmp.getPixel(r, y); y += step }
-
-        if (samples.size < 4) return true   // too few samples — assume bubble
+        val l = box.left.coerceAtLeast(0)
+        val t = box.top.coerceAtLeast(0)
+        val r = box.right.coerceAtMost(bmp.width  - 1)
+        val b = box.bottom.coerceAtMost(bmp.height - 1)
+        if (l >= r || t >= b) return true
 
         val hsv = FloatArray(3)
-        val vals = samples.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
-        val mean = vals.average()
-        val variance = vals.sumOf { v -> (v - mean) * (v - mean) } / vals.size
+        val step = 6
+        var total = 0; var extreme = 0
+        val middleVals = mutableListOf<Float>()
 
-        // Empirical threshold: bubble backgrounds are nearly solid colour (variance
-        // ≈ 0–0.02). Textured artwork has high variation (variance ≫ 0.05). 0.04
-        // leaves comfortable margin for drop shadows and colour-gradient bubble fills.
-        return variance <= 0.04
+        var x = l; while (x <= r) {
+            var y = t; while (y <= b) {
+                Color.colorToHSV(bmp.getPixel(x, y), hsv)
+                val v = hsv[2]
+                total++
+                if (v > 0.82f || v < 0.18f) extreme++
+                else middleVals += v
+                y += step
+            }
+            x += step
+        }
+
+        if (total < 6) return true
+
+        // ── Rule 1: White/dark solid-fill bubble ───────────────────────────
+        // ≥ 72% of interior pixels are "extreme" (very bright fill + dark letters,
+        // OR very dark fill + bright letters). This covers white, off-white, and
+        // near-black text boxes of any shape.
+        if (extreme.toFloat() / total >= 0.72f) return true
+
+        // ── Rule 2: Coloured-fill bubble ───────────────────────────────────
+        // Light-coloured fills (pale yellow, pink, blue) land in the middle
+        // brightness range but are UNIFORM — low variance among middle pixels.
+        // Artwork has varied colours → high variance → correctly rejected.
+        if (middleVals.size >= total * 0.30f) {
+            val mean = middleVals.average()
+            val variance = middleVals.sumOf { v -> (v - mean) * (v - mean) } / middleVals.size
+            if (variance < 0.012) return true
+        }
+
+        // ── Rule 3: Edge-variance fallback ─────────────────────────────────
+        // Original perimeter-sampling method kept as a safety net for edge cases
+        // where interior sampling is inconclusive (very small boxes, thin text,
+        // heavy anti-aliasing that blends fill and artwork).
+        val pad = 10
+        val el = (box.left   - pad).coerceAtLeast(0)
+        val et = (box.top    - pad).coerceAtLeast(0)
+        val er = (box.right  + pad).coerceAtMost(bmp.width  - 1)
+        val eb = (box.bottom + pad).coerceAtMost(bmp.height - 1)
+        if (el < er && et < eb) {
+            val edgeSamples = mutableListOf<Int>()
+            val es = 10
+            var ex = el; while (ex <= er) { edgeSamples += bmp.getPixel(ex, et); edgeSamples += bmp.getPixel(ex, eb); ex += es }
+            var ey = et; while (ey <= eb) { edgeSamples += bmp.getPixel(el, ey); edgeSamples += bmp.getPixel(er, ey); ey += es }
+            if (edgeSamples.size >= 4) {
+                val eVals = edgeSamples.map { px -> Color.colorToHSV(px, hsv); hsv[2] }
+                val eMean = eVals.average()
+                val eVar  = eVals.sumOf { v -> (v - eMean) * (v - eMean) } / eVals.size
+                if (eVar <= 0.04) return true
+            }
+        }
+
+        return false
     }
 
     // SFX / sound-effect guard — second line of defence after the variance check.
