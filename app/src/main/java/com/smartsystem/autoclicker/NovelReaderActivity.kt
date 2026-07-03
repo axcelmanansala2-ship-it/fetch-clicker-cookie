@@ -3,6 +3,7 @@ package com.smartsystem.autoclicker
 import android.animation.ValueAnimator
 import android.app.AlertDialog
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
@@ -75,7 +76,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var ttsSpeed    = 1.0f
     private var selectedVoice: Voice? = null
 
-    // ── content ───────────────────────────────────────────────────────────────
+    // ── content ──────────────────────────────────────────────────────��────────
     private val paragraphs = mutableListOf<String>()
     private val paraViews  = mutableListOf<TextView>()
 
@@ -93,17 +94,28 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isTagalogMode = false
     private var translateInProgress = false
     private lateinit var btnTagalog: TextView
+    private var voiceBeforeTagalog: Voice? = null
+    private var downloadDialog: AlertDialog? = null
+
+    // ── saved reading state ──────────────────────────────────────────────────
+    private lateinit var prefs: SharedPreferences
 
     // ═════════════════════════════════════════════════════════════════════════
     // Lifecycle
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════���═════════════════════════════════════
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         supportActionBar?.hide()
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         buildLayout()
         tts = TextToSpeech(this, this)
         loadFromIntent()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        saveReadingState()
     }
 
     override fun onDestroy() {
@@ -296,7 +308,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         return panel
     }
 
-    // ─── helpers ─────────────────────────────────────────────────────────────
+    // ─── helpers ─────────────────���───────────────────────────────────────────
 
     private fun iconBtn(iconRes: Int, tint: Int) = ImageButton(this).apply {
         setImageResource(iconRes); setColorFilter(tint); background = null
@@ -358,6 +370,8 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 ?.trim() ?: "Novel Reader"
             tvTitle.text = if (name.length > 26) name.take(24) + "…" else name
 
+            withContext(Dispatchers.IO) { cacheFileContent(rawText) }
+
             displayParagraphs(paras)
 
             val resumePara = intent?.getIntExtra(EXTRA_START_PARA, -1) ?: -1
@@ -367,12 +381,57 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                 scrollToPara(currentPara)
                 tvStatus.text = "Resumed from overlay — ${paragraphs.size} paragraphs"
             }
+            saveReadingState()
         }
+    }
+
+    /** Reloads the last-read novel from the app's internal cache (survives app restarts / back button). */
+    private fun loadFromCache(savedPara: Int, wasTagalog: Boolean, title: String) {
+        val cacheFile = File(filesDir, CACHE_FILENAME)
+        if (!cacheFile.exists()) {
+            Toast.makeText(this, "Wala nang naka-save na file", Toast.LENGTH_SHORT).show()
+            showPlaceholder()
+            return
+        }
+        currentFileUri = Uri.fromFile(cacheFile)
+        tvStatus.text = "Loading…"
+        tvTitle.text = if (title.length > 26) title.take(24) + "…" else title
+
+        lifecycleScope.launch {
+            val rawText = withContext(Dispatchers.IO) { cacheFile.readText() }
+            if (rawText.isBlank()) { tvStatus.text = "Could not read saved file"; return@launch }
+            val paras = withContext(Dispatchers.Default) { parseParagraphs(rawText) }
+            if (paras.isEmpty()) { tvStatus.text = "No readable text found"; return@launch }
+
+            displayParagraphs(paras)
+            currentPara = savedPara.coerceIn(0, (paragraphs.size - 1).coerceAtLeast(0))
+            updateProgress()
+            scrollToPara(currentPara)
+            tvStatus.text = "Resumed — ${paragraphs.size} paragraphs"
+            saveReadingState()
+
+            if (wasTagalog) translateToTagalog()
+        }
+    }
+
+    /** Copies the raw novel text into app-internal storage so it can be reopened after the app is closed. */
+    private fun cacheFileContent(rawText: String) {
+        try { File(filesDir, CACHE_FILENAME).writeText(rawText) } catch (_: Exception) {}
+    }
+
+    private fun saveReadingState() {
+        if (paragraphs.isEmpty()) return
+        prefs.edit()
+            .putString(KEY_TITLE, tvTitle.text.toString())
+            .putInt(KEY_PARA, currentPara)
+            .putBoolean(KEY_TAGALOG, isTagalogMode)
+            .putBoolean(KEY_HAS_CACHE, true)
+            .apply()
     }
 
     // ═════════════════════════════════════════════════════════════════════════
     // Overlay mode
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════════════════════════���═════════════════
 
     private fun openOverlayMode() {
         if (paragraphs.isEmpty()) {
@@ -400,7 +459,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         moveTaskToBack(true)
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═══════════════════════════════════��═════════════════════════════════════
     // Tagalog auto-translate
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -418,9 +477,11 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (wasReading) pauseReading()
         translateInProgress = true
         tvStatus.text = "Ini-hahanda ang Tagalog…"
+        showDownloadDialog()
 
         lifecycleScope.launch {
             val ready = withContext(Dispatchers.IO) { NovelTranslator.ensureModelReady() }
+            dismissDownloadDialog()
             if (!ready) {
                 translateInProgress = false
                 tvStatus.text = "Hindi ma-download ang Tagalog model — check internet"
@@ -446,10 +507,11 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             }
 
             isTagalogMode = true
-            tts?.language = resolveTagalogLocale()
+            applyTagalogVoice()
             tvStatus.text = "🇵🇭 Tagalog mode — ${paragraphs.size} paragraphs"
             btnTagalog.setTextColor(C_ACCENT)
             translateInProgress = false
+            saveReadingState()
             if (wasReading) startReading()
         }
     }
@@ -460,21 +522,71 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         paragraphs.clear(); paragraphs.addAll(originalParagraphs)
         paraViews.forEachIndexed { i, tv -> tv.text = paragraphs.getOrElse(i) { "" } }
         isTagalogMode = false
-        tts?.language = Locale.ENGLISH
+        restoreOriginalVoice()
         tvStatus.text = "English mode — ${paragraphs.size} paragraphs"
         btnTagalog.setTextColor(C_MUTED)
+        saveReadingState()
         if (wasReading) startReading()
     }
 
-    private fun resolveTagalogLocale(): Locale {
-        val fil = Locale("fil", "PH")
-        val tl = Locale("tl", "PH")
-        val t = tts ?: return Locale.ENGLISH
-        return when {
-            t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> fil
-            t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> tl
-            else -> Locale.ENGLISH
+    /** Picks an actual installed Filipino/Tagalog TTS voice so playback is understandable, not just text label switching. */
+    private fun applyTagalogVoice() {
+        val t = tts ?: return
+        voiceBeforeTagalog = t.voice
+        val allVoices = t.voices ?: emptySet()
+        val filVoice = allVoices.firstOrNull { it.locale.language == "fil" }
+            ?: allVoices.firstOrNull { it.locale.language == "tl" }
+            ?: allVoices.firstOrNull { it.locale.country == "PH" && it.locale.language != "en" }
+        if (filVoice != null) {
+            t.voice = filVoice
+        } else {
+            // No Tagalog voice installed on this device — fall back to language switch attempt.
+            val fil = Locale("fil", "PH")
+            val tl = Locale("tl", "PH")
+            when {
+                t.isLanguageAvailable(fil) >= TextToSpeech.LANG_AVAILABLE -> t.language = fil
+                t.isLanguageAvailable(tl)  >= TextToSpeech.LANG_AVAILABLE -> t.language = tl
+                else -> Toast.makeText(
+                    this,
+                    "Walang Tagalog voice sa device — i-download sa Settings > Text-to-speech para tama ang bigkas",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
         }
+    }
+
+    private fun restoreOriginalVoice() {
+        val t = tts ?: return
+        val v = voiceBeforeTagalog
+        if (v != null) t.voice = v else t.language = Locale.ENGLISH
+        voiceBeforeTagalog = null
+    }
+
+    private fun showDownloadDialog() {
+        if (downloadDialog?.isShowing == true) return
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(28).toInt(), dp(22).toInt(), dp(28).toInt(), dp(22).toInt())
+        }
+        row.addView(ProgressBar(this).apply {
+            isIndeterminate = true
+            indeterminateTintList = ColorStateList.valueOf(C_ACCENT)
+        })
+        row.addView(TextView(this).apply {
+            text = "  Dina-download ang Tagalog voice pack…"
+            setTextColor(C_TEXT); textSize = 14f
+        })
+        downloadDialog = AlertDialog.Builder(this)
+            .setView(row)
+            .setCancelable(false)
+            .show()
+        downloadDialog?.window?.setBackgroundDrawableResource(android.R.color.transparent)
+    }
+
+    private fun dismissDownloadDialog() {
+        downloadDialog?.dismiss()
+        downloadDialog = null
     }
 
     private fun readContent(uri: Uri): String? {
@@ -594,13 +706,69 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     private fun showPlaceholder() {
         paraContainer.removeAllViews()
-        val msg = TextView(this).apply {
-            text = "📖\n\nShare or open any\n.txt or .epub novel file\nwith this app"
-            setTextColor(C_MUTED); textSize = 15f; gravity = Gravity.CENTER
-            setLineSpacing(0f, 1.6f)
-            setPadding(dp(40).toInt(), dp(80).toInt(), dp(40).toInt(), 0)
+        val hasCache = prefs.getBoolean(KEY_HAS_CACHE, false) && File(filesDir, CACHE_FILENAME).exists()
+
+        if (hasCache) {
+            val title = prefs.getString(KEY_TITLE, "Novel") ?: "Novel"
+            val savedPara = prefs.getInt(KEY_PARA, 0)
+            val wasTagalog = prefs.getBoolean(KEY_TAGALOG, false)
+
+            val wrap = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                gravity = Gravity.CENTER_HORIZONTAL
+                setPadding(dp(40).toInt(), dp(64).toInt(), dp(40).toInt(), 0)
+            }
+            wrap.addView(TextView(this).apply {
+                text = "📖"; textSize = 40f; gravity = Gravity.CENTER
+            })
+            wrap.addView(TextView(this).apply {
+                text = "Continue reading"
+                setTextColor(C_MUTED); textSize = 13.5f; gravity = Gravity.CENTER
+                setPadding(0, dp(16).toInt(), 0, dp(4).toInt())
+            })
+            wrap.addView(TextView(this).apply {
+                text = title
+                setTextColor(C_HEADING); textSize = 18f; gravity = Gravity.CENTER
+                setTypeface(null, Typeface.BOLD)
+                setSingleLine(); ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+            wrap.addView(TextView(this).apply {
+                text = "Paragraph ${savedPara + 1}" + if (wasTagalog) "   •   🇵🇭 Tagalog" else ""
+                setTextColor(C_MUTED); textSize = 12.5f; gravity = Gravity.CENTER
+                setPadding(0, dp(6).toInt(), 0, dp(22).toInt())
+            })
+
+            val continueBtn = TextView(this).apply {
+                text = "▶   Continue Reading"
+                setTextColor(Color.WHITE); textSize = 14.5f
+                setTypeface(null, Typeface.BOLD); gravity = Gravity.CENTER
+                setPadding(dp(28).toInt(), dp(13).toInt(), dp(28).toInt(), dp(13).toInt())
+                val bg = GradientDrawable().apply {
+                    cornerRadius = dp(28f); setColor(C_ACCENT)
+                }
+                background = RippleDrawable(ColorStateList.valueOf(Color.WHITE), bg, null)
+                isClickable = true; isFocusable = true
+                setOnClickListener { loadFromCache(savedPara, wasTagalog, title) }
+            }
+            continueBtn.layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT)
+            wrap.addView(continueBtn)
+
+            wrap.addView(TextView(this).apply {
+                text = "or share / open a new .txt or .epub file"
+                setTextColor(C_MUTED); textSize = 12f; gravity = Gravity.CENTER
+                setPadding(0, dp(26).toInt(), 0, 0)
+            })
+
+            paraContainer.addView(wrap)
+        } else {
+            val msg = TextView(this).apply {
+                text = "📖\n\nShare or open any\n.txt or .epub novel file\nwith this app"
+                setTextColor(C_MUTED); textSize = 15f; gravity = Gravity.CENTER
+                setLineSpacing(0f, 1.6f)
+                setPadding(dp(40).toInt(), dp(80).toInt(), dp(40).toInt(), 0)
+            }
+            paraContainer.addView(msg)
         }
-        paraContainer.addView(msg)
     }
 
     // ─── highlight ────────────────────────────────────────────────────────────
@@ -664,6 +832,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (wasReading) { isReading = false; tts?.stop(); readingJob?.cancel() }
         currentPara = (currentPara - 1).coerceAtLeast(0)
         updateProgress(); scrollToPara(currentPara)
+        saveReadingState()
         if (wasReading) startReading()
     }
 
@@ -672,6 +841,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         if (wasReading) { isReading = false; tts?.stop(); readingJob?.cancel() }
         currentPara = (currentPara + 1).coerceAtMost((paragraphs.size - 1).coerceAtLeast(0))
         updateProgress(); scrollToPara(currentPara)
+        saveReadingState()
         if (wasReading) startReading()
     }
 
@@ -688,6 +858,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             speakAndWait(para)
             if (!isReading) break
             currentPara++
+            withContext(Dispatchers.Main) { saveReadingState() }
             delay(180)
         }
         if (isReading) {
@@ -731,7 +902,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             progressBar.progress = pct
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
+    // ═════════════��═══════════════════════════════════════════════════════════
     // TTS
     // ═════════════════════════════════════════════════════════════════════════
 
@@ -782,7 +953,7 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // ═════════════════════════════════════════════════════════════════════════
     // Settings dialog
-    // ═════════════════════════════════════════════════════════════════════════
+    // ════════════════════════════════════════════════���════════════════════════
 
     private fun showSettings() {
         val wasReading = isReading
@@ -888,5 +1059,11 @@ class NovelReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     companion object {
         const val EXTRA_START_PARA = "extra_start_para"
+        private const val PREFS_NAME = "novel_reader_prefs"
+        private const val KEY_TITLE = "title"
+        private const val KEY_PARA = "para"
+        private const val KEY_TAGALOG = "tagalog"
+        private const val KEY_HAS_CACHE = "has_cache"
+        private const val CACHE_FILENAME = "last_novel_cache.txt"
     }
 }
