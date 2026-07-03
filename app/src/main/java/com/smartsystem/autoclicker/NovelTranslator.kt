@@ -122,7 +122,7 @@ object NovelTranslator {
         if (text.isBlank()) return text
         val (protectedText, restoreList) = protect(text)
         val result = try {
-            suspendCancellableCoroutine { cont ->
+            suspendCancellableCoroutine<String?> { cont ->
                 translator.translate(protectedText)
                     .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
                     .addOnFailureListener { if (cont.isActive) cont.resume(null) }
