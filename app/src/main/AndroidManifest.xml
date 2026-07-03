@@ -83,6 +83,13 @@
         </activity>
 
         <service
+            android:name=".NovelReaderOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="novelReaderOverlay" />
+        </service>
+
+        <service
             android:name=".FloatingOverlayService"
             android:exported="false"
             android:foregroundServiceType="specialUse">
