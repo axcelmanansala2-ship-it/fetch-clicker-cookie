@@ -97,7 +97,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     // ── Bubble data ───────────────────────────────────────────────────────────
     /** Detected bubble Rects for each page, in bitmap coordinates. */
-    private val pageBubbles   = mutableListOf<List<Rect>>()
+    private val pageBubbles   = mutableListOf<List<BubbleInfo>>()
     /** One BubbleOverlayView per page, matched by index. */
     private val overlayViews  = mutableListOf<BubbleOverlayView>()
     /** One ImageView per page (the rendered page bitmap). */
@@ -353,7 +353,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
             return
         }
 
-        for ((bubbleIdx, bubbleRect) in bubbles.withIndex()) {
+        for ((bubbleIdx, bubbleInfo) in bubbles.withIndex()) {
             if (!isReading) return
 
             // ── Scroll so the bubble is visible ──────────────────────────────
@@ -362,7 +362,8 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
                     // Wait for layout to be ready
                     if (pageFrame.height == 0) delay(300)
                 }
-                val scaleY = pageFrame.height.toFloat() / srcBitmap.height.coerceAtLeast(1)
+                val bubbleRect = bubbleInfo.rect
+            val scaleY = pageFrame.height.toFloat() / srcBitmap.height.coerceAtLeast(1)
                 val bubbleCentreInPage = ((bubbleRect.top + bubbleRect.bottom) / 2f * scaleY).toInt()
                 val targetScrollY = (pageFrame.top + bubbleCentreInPage - scrollView.height / 2)
                     .coerceAtLeast(0)
@@ -381,7 +382,7 @@ class ManhwaReaderActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
             // ── OCR the bubble crop ───────────────────────────────────────────
             val text = withContext(Dispatchers.IO) {
-                ocrBubbleCrop(srcBitmap, bubbleRect)
+                ocrBubbleCrop(srcBitmap, bubbleInfo.rect)
             }
 
             // ── Speak ─────────────────────────────────────────────────────────
